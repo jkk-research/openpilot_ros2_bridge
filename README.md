@@ -29,3 +29,7 @@ Follow the instructions from official repository: https://github.com/commaai/ope
     python3 openpilot_prediction_publisher.py && python3 openpilot_prediction_visualizer.py
 
 
+
+[@tambetm](https://github.com/tambetm) Thanks for the original ROS1 version
+
+
