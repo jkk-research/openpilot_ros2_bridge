@@ -21,5 +21,11 @@ Follow the instructions from official repository: https://github.com/commaai/ope
     ```
     alternatively you can add more services to the bridge
 
-4. Launch the ROS2 scripts
+4. *[PC running ROS2]* Launch the ROS2 scripts
+    ```
+    cd openpilot
+    source .venv/bin/activate
+    cd openpilot_ros2_bridge/openpilot
+    python3 openpilot_prediction_publisher.py && python3 openpilot_prediction_visualizer.py
+
 
