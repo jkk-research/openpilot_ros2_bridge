@@ -2,7 +2,7 @@
 
 import rclpy
 import numpy as np
-import cereal.messaging as messaging
+import openpilot.cereal.messaging as messaging
 from rclpy.node import Node
 from std_msgs.msg import MultiArrayDimension
 from std_msgs.msg import Float32MultiArray
