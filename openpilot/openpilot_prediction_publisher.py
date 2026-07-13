@@ -2,6 +2,7 @@
 
 import rclpy
 import numpy as np
+import threading
 import openpilot.cereal.messaging as messaging
 from rclpy.node import Node
 from std_msgs.msg import MultiArrayDimension
@@ -16,7 +17,6 @@ class OpenPilotPredictionPublisher(Node):
 
         # Parameters
         self.declare_parameter("modelv2_port", "modelV2")
-
         modelv2_port = self.get_parameter("modelv2_port").value
 
         # OpenPilot publishes modelV2 through its messaging bus; subscribe directly.
@@ -39,9 +39,11 @@ class OpenPilotPredictionPublisher(Node):
         self.desire_prediction_pub = self.create_publisher(Float32MultiArray, 'desire_prediction', 1)
         self.desire_state_pub = self.create_publisher(Float32MultiArray, 'desire_state', 1)
 
-        self.create_timer(0.01, self.poll_predictions)
+        # Start a dedicated thread for the blocking cereal socket
+        self.cereal_thread = threading.Thread(target=self.cereal_loop, daemon=True)
+        self.cereal_thread.start()
 
-        print("OpenPilot Prediction Publisher Node is ready and polling for predictions.")
+        print("OpenPilot Prediction Publisher Node is ready and waiting for predictions.")
         
     def publish_array(self, data, publisher):
         data = np.asarray(data, dtype=np.float32)
@@ -75,12 +77,16 @@ class OpenPilotPredictionPublisher(Node):
 
         return np.stack((x[:n], y[:n], z[:n], t[:n]), axis=0)
 
-    def poll_predictions(self):
-        message = messaging.recv_one(self.modelv2_sock)
-        if not message:
-            return
+    def cereal_loop(self):
+        # This loop blocks on recv_one without freezing the ROS 2 executor
+        while rclpy.ok():
+            message = messaging.recv_one(self.modelv2_sock)
+            if message:
+                self.process_and_publish(message)
 
-        print("Received modelV2 message, processing predictions...")
+    def process_and_publish(self, message):
+        # Optional: You can uncomment this for debugging, but it will print at high frequency
+        # print("Received modelV2 message, processing predictions...")
 
         modelV2 = message.modelV2
         fallback_t = modelV2.position.t
@@ -133,6 +139,11 @@ class OpenPilotPredictionPublisher(Node):
 if __name__ == '__main__':
     rclpy.init()
     node = OpenPilotPredictionPublisher()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
