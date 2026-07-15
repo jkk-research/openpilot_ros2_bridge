@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y \
     git \
     curl \
     vim \
+    nano \
     tmux \
     libqt5charts5-dev \
     file \

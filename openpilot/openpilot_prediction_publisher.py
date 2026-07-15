@@ -3,7 +3,7 @@
 import rclpy
 import numpy as np
 import threading
-import openpilot.cereal.messaging as messaging
+import cereal.messaging as messaging
 from rclpy.node import Node
 from std_msgs.msg import MultiArrayDimension
 from std_msgs.msg import Float32MultiArray
@@ -36,6 +36,9 @@ class OpenPilotPredictionPublisher(Node):
         self.lane_lines_probs_pub = self.create_publisher(Float32MultiArray, 'lane_line_probs', 1)
         self.road_edges_pub = self.create_publisher(Float32MultiArray, 'road_edges', 1)
         self.road_edges_std_pub = self.create_publisher(Float32MultiArray, 'road_edges_std', 1)
+        self.road_edges_probs_pub = self.create_publisher(Float32MultiArray, 'road_edges_probs', 1)
+        # Leads V3 publisher
+        self.leads_v3_pub = self.create_publisher(Float32MultiArray, 'leads_v3', 1)
         self.desire_prediction_pub = self.create_publisher(Float32MultiArray, 'desire_prediction', 1)
         self.desire_state_pub = self.create_publisher(Float32MultiArray, 'desire_state', 1)
 
@@ -60,7 +63,8 @@ class OpenPilotPredictionPublisher(Node):
         publisher.publish(multiarray)
 
     def stack_xyz_t(self, xyz_t_data, fallback_t=None):
-        x = np.asarray(xyz_t_data.x, dtype=np.float32)
+        # flip x to match ROS coordinate convention (negate x)
+        x = -np.asarray(xyz_t_data.x, dtype=np.float32)
         y = np.asarray(xyz_t_data.y, dtype=np.float32)
         z = np.asarray(xyz_t_data.z, dtype=np.float32)
 
@@ -114,6 +118,45 @@ class OpenPilotPredictionPublisher(Node):
 
         # road edge standard deviations
         self.publish_array(modelV2.roadEdgeStds, self.road_edges_std_pub)
+
+        # derive and publish road edge probabilities (confidence = 1 - std, clipped)
+        try:
+            road_edge_stds = np.asarray(modelV2.roadEdgeStds, dtype=np.float32)
+            road_edge_probs = np.clip(1.0 - road_edge_stds, 0.0, 1.0)
+            self.publish_array(road_edge_probs, self.road_edges_probs_pub)
+        except Exception:
+            pass
+
+        # leadsV3
+        try:
+            if hasattr(modelV2, 'leadsV3') and len(modelV2.leadsV3) > 0:
+                leads_v3 = []
+                for lead in modelV2.leadsV3:
+                    # flip x to match ROS coordinate convention (negate x)
+                    x = -np.asarray(lead.x, dtype=np.float32)
+                    xStd = np.asarray(lead.xStd, dtype=np.float32)
+                    y = np.asarray(lead.y, dtype=np.float32)
+                    yStd = np.asarray(lead.yStd, dtype=np.float32)
+                    v = np.asarray(lead.v, dtype=np.float32)
+                    vStd = np.asarray(lead.vStd, dtype=np.float32)
+                    a = np.asarray(lead.a, dtype=np.float32)
+                    aStd = np.asarray(lead.aStd, dtype=np.float32)
+                    t = np.asarray(lead.t, dtype=np.float32) if len(lead.t) > 0 else np.asarray(fallback_t, dtype=np.float32)
+
+                    n = min(len(x), len(xStd), len(y), len(yStd), len(v), len(vStd), len(a), len(aStd), len(t))
+                    if n == 0:
+                        arr = np.zeros((9, 0), dtype=np.float32)
+                    else:
+                        arr = np.stack((x[:n], xStd[:n], y[:n], yStd[:n], v[:n], vStd[:n], a[:n], aStd[:n], t[:n]), axis=0)
+                    leads_v3.append(arr)
+
+                if len(leads_v3) > 0:
+                    lead_min_len = min(arr.shape[1] for arr in leads_v3)
+                    leads_v3_data = np.stack([arr[:, :lead_min_len] for arr in leads_v3], axis=0)
+                    self.publish_array(leads_v3_data, self.leads_v3_pub)
+        except Exception:
+            # Defensive: don't let unexpected message shapes break the publisher
+            pass
 
         # position standard deviation
         self.publish_array([modelV2.position.xStd, modelV2.position.yStd, modelV2.position.zStd, modelV2.position.t], self.position_std_pub)
