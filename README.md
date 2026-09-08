@@ -86,8 +86,8 @@ ros2 topic echo /lanes_markers
 
 ## Virtual environment / container workflow
 
-The `docker/Dockerfile` provides a ROS 2 Jazzy plus openpilot environment.
-It now copies the local repository into `/workspace/ros2_ws/src/openpilot_ros2_bridge`, builds the ROS 2 package with `colcon`, and keeps the openpilot `.venv` active in the container shell.
+The `docker/Dockerfile` provides a ROS 2 Jazzy environment for the bridge.
+It now copies the local repository into `/workspace/ros2_ws/src/openpilot_ros2_bridge`, builds the ROS 2 package with `colcon`, and expects an already prepared host-side openpilot checkout to be bind-mounted into the container at runtime.
 
 Build the image manually:
 
@@ -99,7 +99,9 @@ docker build -t openpilot_ros2_bridge:local -f docker/Dockerfile .
 Validate ROS 2 and openpilot inside the container:
 
 ```bash
-docker run --rm --network host --ipc host openpilot_ros2_bridge:local \
+docker run --rm --network host --ipc host \
+  -v /path/to/openpilot:/workspace/openpilot \
+  openpilot_ros2_bridge:local \
   bash -lc 'source /opt/ros/jazzy/setup.bash && \
             source /workspace/openpilot/.venv/bin/activate && \
             source /workspace/ros2_ws/install/setup.bash && \
@@ -116,17 +118,19 @@ source /path/to/ros2_ws/install/setup.bash
 
 ros2 launch openpilot_ros2_bridge openpilot_bridge_docker.launch.py \
   repo_root:=/path/to/openpilot_ros2_bridge \
+  host_openpilot_root:=/path/to/openpilot \
   comma_ip:=<comma_device_ip> \
   ros_domain_id:=0 \
   start_bridge:=true
 ```
 
-The Docker launch file builds the image, starts the container with `--network host` and `--ipc host`, forwards `ROS_DOMAIN_ID`, and then runs the in-container `openpilot_bridge.launch.py`.
+The Docker launch file builds the image, starts the container with `--network host` and `--ipc host`, forwards `ROS_DOMAIN_ID` and `RMW_IMPLEMENTATION`, and then runs the in-container `openpilot_bridge.launch.py`.
 
 For a quick runtime smoke test without a Comma device connection:
 
 ```bash
 docker run --rm --network host --ipc host openpilot_ros2_bridge:local \
+  -v /path/to/openpilot:/workspace/openpilot \
   bash -lc 'source /opt/ros/jazzy/setup.bash && \
             source /workspace/openpilot/.venv/bin/activate && \
             source /workspace/ros2_ws/install/setup.bash && \
