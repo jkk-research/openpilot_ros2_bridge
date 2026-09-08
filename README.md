@@ -87,7 +87,50 @@ ros2 topic echo /lanes_markers
 ## Virtual environment / container workflow
 
 The `docker/Dockerfile` provides a ROS 2 Jazzy plus openpilot environment.
-Inside the container, build this package with `colcon build --symlink-install`, source ROS 2 and the openpilot `.venv`, and launch the stack with the same `ros2 launch` command shown above.
+It now copies the local repository into `/workspace/ros2_ws/src/openpilot_ros2_bridge`, builds the ROS 2 package with `colcon`, and keeps the openpilot `.venv` active in the container shell.
+
+Build the image manually:
+
+```bash
+cd /path/to/openpilot_ros2_bridge
+docker build -t openpilot_ros2_bridge:local -f docker/Dockerfile .
+```
+
+Validate ROS 2 and openpilot inside the container:
+
+```bash
+docker run --rm --network host --ipc host openpilot_ros2_bridge:local \
+  bash -lc 'source /opt/ros/jazzy/setup.bash && \
+            source /workspace/openpilot/.venv/bin/activate && \
+            source /workspace/ros2_ws/install/setup.bash && \
+            python3 -c "import rclpy, cereal.messaging; print(\"ROS 2 and openpilot imports OK\")" && \
+            ros2 pkg prefix openpilot_ros2_bridge && \
+            test -x /workspace/openpilot/cereal/messaging/bridge'
+```
+
+Launch the containerized bridge directly from a ROS 2 launch file on the host:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source /path/to/ros2_ws/install/setup.bash
+
+ros2 launch openpilot_ros2_bridge openpilot_bridge_docker.launch.py \
+  repo_root:=/path/to/openpilot_ros2_bridge \
+  comma_ip:=<comma_device_ip> \
+  ros_domain_id:=0 \
+  start_bridge:=true
+```
+
+The Docker launch file builds the image, starts the container with `--network host` and `--ipc host`, forwards `ROS_DOMAIN_ID`, and then runs the in-container `openpilot_bridge.launch.py`.
+
+For a quick runtime smoke test without a Comma device connection:
+
+```bash
+docker run --rm --network host --ipc host openpilot_ros2_bridge:local \
+  bash -lc 'source /opt/ros/jazzy/setup.bash && \
+            source /workspace/openpilot/.venv/bin/activate && \
+            source /workspace/ros2_ws/install/setup.bash && \
+            timeout 15 ros2 launch openpilot_ros2_bridge openpilot_bridge.launch.py start_bridge:=false start_camera:=false'
+```
 
 [@tambetm](https://github.com/tambetm) Thanks for the original ROS1 version.
-

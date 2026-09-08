@@ -14,6 +14,8 @@ setup(
         (f'share/{package_name}', ['package.xml']),
         (f'share/{package_name}/launch', glob('launch/*.launch.py')),
         (f'share/{package_name}/scripts', glob('openpilot/*.py')),
+        (f'share/{package_name}/cereal', glob('cereal/*.capnp')),
+        (f'share/{package_name}/docker', ['docker/Dockerfile', 'docker/run_openpilot_bridge_container.sh', 'docker/run_openpilot_bridge_host.sh']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
