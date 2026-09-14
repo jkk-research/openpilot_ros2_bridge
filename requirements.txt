@@ -1,0 +1,4 @@
+numpy==1.26.4
+pycapnp==2.2.4
+pyzmq==27.2.0
+rospkg==1.6.3

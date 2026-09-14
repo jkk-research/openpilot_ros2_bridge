@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 
+import sys
+
 import rclpy
 import zmq
 from rclpy.node import Node
 
 from sensor_msgs.msg import CompressedImage
-from cereal import log_from_bytes
+from cereal_compat import log_from_bytes
 
 class OpenPilotCameraPublisher(Node):
     def __init__(self):
@@ -59,9 +61,13 @@ class OpenPilotCameraPublisher(Node):
             self.camera_publisher.publish(msg)
 
 
-if __name__ == '__main__':
-    rclpy.init()
+def main(args=None):
+    rclpy.init(args=args)
     node = OpenPilotCameraPublisher()
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main(sys.argv)

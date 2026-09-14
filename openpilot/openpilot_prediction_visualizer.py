@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import sys
+
 import rclpy
 import numpy as np
 import math
@@ -324,9 +326,13 @@ def float32_multiarray_to_numpy(multiarray):
     data = multiarray.data[multiarray.layout.data_offset:]
     return np.array(data, dtype=np.float32).reshape(dims)
 
-if __name__ == '__main__':
-    rclpy.init()
+def main(args=None):
+    rclpy.init(args=args)
     node = OpenPilotPredictionVisualizer()
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main(sys.argv)
