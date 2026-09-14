@@ -1,7 +1,7 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, TimerAction
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import EnvironmentVariable, LaunchConfiguration
 from ament_index_python.packages import get_package_share_directory
 
 
@@ -16,8 +16,11 @@ def _script_command(script_name, ros_arguments):
             LaunchConfiguration('ros_distro'),
             '/setup.bash && ',
             'source "',
+            LaunchConfiguration('bridge_venv'),
+            '/bin/activate" && ',
+            'export PYTHONPATH="',
             LaunchConfiguration('openpilot_root'),
-            '/.venv/bin/activate" && ',
+            '/openpilot:${PYTHONPATH:-}" && ',
             'python3 "',
             script_path,
             '" --ros-args ',
@@ -35,9 +38,6 @@ def generate_launch_description():
             'bash',
             '-lc',
             [
-                'source "',
-                LaunchConfiguration('openpilot_root'),
-                '/.venv/bin/activate" && ',
                 'cd "',
                 LaunchConfiguration('openpilot_root'),
                 '/cereal/messaging" && ',
@@ -103,6 +103,13 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('ros_distro', default_value='jazzy'),
         DeclareLaunchArgument('openpilot_root', default_value='/workspace/openpilot'),
+        DeclareLaunchArgument(
+            'bridge_venv',
+            default_value=EnvironmentVariable(
+                'OPENPILOT_ROS2_BRIDGE_VENV',
+                default_value='/workspace/ros2_ws/src/openpilot_ros2_bridge/.venv',
+            ),
+        ),
         DeclareLaunchArgument('comma_ip', default_value='127.0.0.1'),
         DeclareLaunchArgument('start_bridge', default_value='true'),
         DeclareLaunchArgument('bridge_topics', default_value='modelV2,carControl,carState,longitudinalPlan,lateralPlan'),

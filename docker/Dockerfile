@@ -15,6 +15,8 @@ RUN apt-get update && apt-get install -y \
     sudo \
     git \
     curl \
+    python3-pip \
+    python3-venv \
     vim \
     nano \
     tmux \
@@ -38,16 +40,23 @@ SHELL ["/bin/bash", "-c"]
 # 2. Copy the ROS 2 bridge source tree into a colcon workspace
 RUN mkdir -p /workspace/ros2_ws/src
 COPY . /workspace/ros2_ws/src/openpilot_ros2_bridge
-RUN chmod +x /workspace/ros2_ws/src/openpilot_ros2_bridge/docker/*.sh
+RUN chmod +x /workspace/ros2_ws/src/openpilot_ros2_bridge/docker/*.sh /workspace/ros2_ws/src/openpilot_ros2_bridge/scripts/*.sh
 
-# 3. Set up environment variables and sourcing for bash
-# The openpilot tree is expected to be bind-mounted to /workspace/openpilot at runtime
+# 3. Create the bridge Python virtual environment
+RUN python3 -m venv --system-site-packages /workspace/ros2_ws/src/openpilot_ros2_bridge/.venv && \
+    source /workspace/ros2_ws/src/openpilot_ros2_bridge/.venv/bin/activate && \
+    python3 -m pip install --upgrade pip && \
+    python3 -m pip install -r /workspace/ros2_ws/src/openpilot_ros2_bridge/requirements.txt
+
+# 4. Set up environment variables and sourcing for bash
 RUN echo "source /opt/ros/jazzy/setup.bash" >> /root/.bashrc && \
+    echo "source /workspace/ros2_ws/src/openpilot_ros2_bridge/.venv/bin/activate" >> /root/.bashrc && \
     echo "source /workspace/ros2_ws/install/setup.bash" >> /root/.bashrc && \
     echo "export RMW_IMPLEMENTATION=rmw_fastrtps_cpp" >> /root/.bashrc
 
-# 4. Build the ROS 2 bridge package
+# 5. Build the ROS 2 bridge package
 RUN source /opt/ros/jazzy/setup.bash && \
+    source /workspace/ros2_ws/src/openpilot_ros2_bridge/.venv/bin/activate && \
     cd /workspace/ros2_ws && \
     colcon build --symlink-install --packages-select openpilot_ros2_bridge
 

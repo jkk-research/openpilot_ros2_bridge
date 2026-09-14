@@ -34,6 +34,7 @@ def generate_launch_description():
             host_runner,
             LaunchConfiguration('repo_root'),
             LaunchConfiguration('image_name'),
+            LaunchConfiguration('image_source'),
             LaunchConfiguration('container_name'),
             LaunchConfiguration('ros_domain_id'),
             LaunchConfiguration('rmw_implementation'),
@@ -46,7 +47,8 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument('repo_root', default_value=EnvironmentVariable('OPENPILOT_ROS2_BRIDGE_REPO', default_value='.')),
-        DeclareLaunchArgument('image_name', default_value='openpilot_ros2_bridge:local'),
+        DeclareLaunchArgument('image_name', default_value='ghcr.io/jkk-research/openpilot_ros2_bridge:latest'),
+        DeclareLaunchArgument('image_source', default_value='pull'),
         DeclareLaunchArgument('container_name', default_value='openpilot_ros2_bridge'),
         DeclareLaunchArgument('ros_distro', default_value='jazzy'),
         DeclareLaunchArgument('ros_domain_id', default_value=EnvironmentVariable('ROS_DOMAIN_ID', default_value='0')),
