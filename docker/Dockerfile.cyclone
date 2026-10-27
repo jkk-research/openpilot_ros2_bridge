@@ -1,0 +1,14 @@
+# Bridge image for hosts whose ROS 2 stack runs on CycloneDDS.
+# Adds the Cyclone RMW and the minimum needed to build msgq + cereal bridge
+# (see scripts/build_openpilot_minimal.sh) on top of the published image.
+FROM ghcr.io/jkk-research/openpilot_ros2_bridge:latest
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ros-jazzy-rmw-cyclonedds-cpp \
+      libzmq3-dev \
+      python3-dev \
+      g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# zstandard is imported by openpilot.common.utils, which cereal.messaging needs
+RUN /workspace/ros2_ws/src/openpilot_ros2_bridge/.venv/bin/pip install --no-cache-dir cython==3.0.11 zstandard==0.23.0

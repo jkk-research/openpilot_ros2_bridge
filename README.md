@@ -4,6 +4,8 @@ ROS 2 bridge for Comma 3/X and Comma 4 devices running openpilot.
 
 ## Quick start
 
+To run on a vehicle PC whose ROS 2 stack uses CycloneDDS, including SSH setup for the Comma, see [QUICKSTART.md](QUICKSTART.md).
+
 Both options need ROS 2 Jazzy, an openpilot checkout, and this package built in a ROS 2 workspace on the host:
 
 ```bash
@@ -47,7 +49,11 @@ The bridge now exposes:
 - `lateralPlan` as ROS 2 topics for path points, curvature, solver state, and lane-change state
 - `carState` and `carControl` summaries as ROS 2 topics
 - RViz marker topics for plan, lane lines, road edges, and leads
+- TF frames for openpilot's calibrated frame and the Comma device, driven by openpilot calibration
 - optional compressed camera output
+
+All topics are published under the `openpilot` namespace (for example `/openpilot/lane_lines`). Change it with `namespace:=<name>`.
+Fields that a given openpilot version no longer has are published as `NaN`, so array layouts stay the same across versions.
 
 ## Prerequisites
 
@@ -97,17 +103,33 @@ Useful optional arguments:
 
 - `start_remote_bridge:=true`
 - `remote_bridge_target:=comma@<comma_device_ip>`
-- `bridge_topics:=modelV2,carControl,carState,longitudinalPlan,lateralPlan`
+- `bridge_topics:=modelV2,carControl,carState,longitudinalPlan,lateralPlan,liveCalibration,extrinsicsCalibration`
+- `namespace:=openpilot`
 - `camera_ip:=<comma_device_ip>`
 - `camera_port:=8002`
 - `camera_name:=roadCamera`
+
+## TF frames
+
+With `start_tf:=true` (default), `openpilot_tf_publisher` broadcasts:
+
+- `base_frame` → `openpilot`: openpilot's calibrated frame (forward, right, down), with its origin at the Comma device. Model outputs and markers live in this frame. The translation is the device's mount position in `base_frame`. When `use_calibration_height:=true`, the height comes from openpilot calibration minus `base_frame_height`, the height of `base_frame` above the road.
+- `openpilot` → `openpilot_device`: the physical device orientation, the inverse of calibration `rpyCalib`, updated as calibration changes.
+
+Calibration is read from `liveCalibration`, or from `extrinsicsCalibration` on openpilot versions that use that name. Example for a car whose `base_link` is 0.37 m above the road, with the Comma 1.6 m ahead of it:
+
+```bash
+ros2 launch openpilot_ros2_bridge openpilot_bridge.launch.py \
+  openpilot_root:=/path/to/openpilot comma_ip:=<comma_device_ip> \
+  base_frame:=base_link device_x:=1.6 device_y:=0.0 base_frame_height:=0.37
+```
 
 ## Verifying the topics
 
 After launch, verify that the lane and plan topics are active:
 
 ```bash
-ros2 topic list | grep -E 'lane|plan|car_state|car_control|desired_curvature'
+ros2 topic list | grep /openpilot/
 ```
 
 Useful topics include:
@@ -125,8 +147,8 @@ Useful topics include:
 For RViz visualization:
 
 ```bash
-ros2 topic echo /plan_markers
-ros2 topic echo /lanes_markers
+ros2 topic echo /openpilot/plan_markers
+ros2 topic echo /openpilot/lanes_markers
 ```
 
 ## Virtual environment / container workflow

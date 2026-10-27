@@ -31,7 +31,9 @@ def _script_command(script_name, ros_arguments):
             '/msgq_repo:${PYTHONPATH:-}" && ',
             'python3 "',
             script_path,
-            '" --ros-args ',
+            '" --ros-args -r __ns:=/',
+            LaunchConfiguration('namespace'),
+            ' ',
             *ros_arguments,
         ],
     ]
@@ -91,7 +93,28 @@ def generate_launch_description():
     )
 
     prediction_visualizer = ExecuteProcess(
-        cmd=_script_command('openpilot_prediction_visualizer.py', []),
+        cmd=_script_command(
+            'openpilot_prediction_visualizer.py',
+            ['-p openpilot_frame:=', LaunchConfiguration('openpilot_frame')],
+        ),
+        output='screen',
+    )
+
+    tf_publisher = ExecuteProcess(
+        condition=IfCondition(LaunchConfiguration('start_tf')),
+        cmd=_script_command(
+            'openpilot_tf_publisher.py',
+            [
+                '-p base_frame:=', LaunchConfiguration('base_frame'),
+                ' -p openpilot_frame:=', LaunchConfiguration('openpilot_frame'),
+                ' -p device_frame:=', LaunchConfiguration('device_frame'),
+                ' -p device_x:=', LaunchConfiguration('device_x'),
+                ' -p device_y:=', LaunchConfiguration('device_y'),
+                ' -p device_z:=', LaunchConfiguration('device_z'),
+                ' -p use_calibration_height:=', LaunchConfiguration('use_calibration_height'),
+                ' -p base_frame_height:=', LaunchConfiguration('base_frame_height'),
+            ],
+        ),
         output='screen',
     )
 
@@ -121,10 +144,23 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument('comma_ip', default_value='127.0.0.1'),
         DeclareLaunchArgument('start_bridge', default_value='true'),
-        DeclareLaunchArgument('bridge_topics', default_value='modelV2,carControl,carState,longitudinalPlan,lateralPlan'),
+        DeclareLaunchArgument('bridge_topics', default_value='modelV2,carControl,carState,longitudinalPlan,lateralPlan,liveCalibration,extrinsicsCalibration'),
+        DeclareLaunchArgument('namespace', default_value='openpilot'),
+        DeclareLaunchArgument('start_tf', default_value='true'),
+        DeclareLaunchArgument('base_frame', default_value='base_link'),
+        DeclareLaunchArgument('openpilot_frame', default_value='openpilot'),
+        DeclareLaunchArgument('device_frame', default_value='openpilot_device'),
+        DeclareLaunchArgument('device_x', default_value='0.0'),
+        DeclareLaunchArgument('device_y', default_value='0.0'),
+        DeclareLaunchArgument('device_z', default_value='0.0'),
+        DeclareLaunchArgument('use_calibration_height', default_value='true'),
+        DeclareLaunchArgument('base_frame_height', default_value='0.0'),
         DeclareLaunchArgument('start_remote_bridge', default_value='false'),
         DeclareLaunchArgument('remote_bridge_target', default_value='comma@127.0.0.1'),
-        DeclareLaunchArgument('remote_bridge_command', default_value='cd openpilot/cereal/messaging && ./bridge'),
+        DeclareLaunchArgument(
+            'remote_bridge_command',
+            default_value='cd /data/openpilot/openpilot/cereal/messaging 2>/dev/null || cd /data/openpilot/cereal/messaging && exec ./bridge',
+        ),
         DeclareLaunchArgument('modelv2_port', default_value='modelV2'),
         DeclareLaunchArgument('longitudinal_plan_port', default_value='longitudinalPlan'),
         DeclareLaunchArgument('lateral_plan_port', default_value='lateralPlan'),
@@ -137,5 +173,5 @@ def generate_launch_description():
         DeclareLaunchArgument('image_format', default_value='jpeg'),
         remote_bridge,
         local_bridge,
-        TimerAction(period=2.0, actions=[prediction_publisher, prediction_visualizer, camera_publisher]),
+        TimerAction(period=2.0, actions=[prediction_publisher, prediction_visualizer, tf_publisher, camera_publisher]),
     ])

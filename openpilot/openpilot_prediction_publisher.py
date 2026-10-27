@@ -119,6 +119,14 @@ class OpenPilotPredictionPublisher(Node):
                 return float(raw_value)
             return float(int(value))
 
+    def field(self, struct, *names, default=float("nan")):
+        # First of `names` present in this openpilot's schema; fields get renamed or dropped between versions
+        fieldnames = struct.schema.fieldnames
+        for name in names:
+            if name in fieldnames:
+                return getattr(struct, name)
+        return default
+
     def stack_xyz_t(self, xyz_t_data, fallback_t=None):
         x = -np.asarray(xyz_t_data.x, dtype=np.float32)
         y = np.asarray(xyz_t_data.y, dtype=np.float32)
@@ -246,10 +254,12 @@ class OpenPilotPredictionPublisher(Node):
         if disengage_predictions is not None:
             self.publish_array(disengage_predictions, self.model_disengage_predictions_pub)
 
-        self.publish_array(modelV2.temporalPose.trans, self.temporal_pose_trans_pub)
-        self.publish_array(modelV2.temporalPose.transStd, self.temporal_pose_trans_std_pub)
-        self.publish_array(modelV2.temporalPose.rot, self.temporal_pose_rot_pub)
-        self.publish_array(modelV2.temporalPose.rotStd, self.temporal_pose_rot_std_pub)
+        temporal_pose = self.field(modelV2, 'temporalPose', default=None)
+        if temporal_pose is not None:
+            self.publish_array(temporal_pose.trans, self.temporal_pose_trans_pub)
+            self.publish_array(temporal_pose.transStd, self.temporal_pose_trans_std_pub)
+            self.publish_array(temporal_pose.rot, self.temporal_pose_rot_pub)
+            self.publish_array(temporal_pose.rotStd, self.temporal_pose_rot_std_pub)
         self.publish_array([self.to_float(modelV2.action.desiredCurvature)], self.desired_curvature_pub)
         self.publish_array([self.to_float(modelV2.confidence)], self.model_confidence_pub)
 
@@ -312,7 +322,7 @@ class OpenPilotPredictionPublisher(Node):
                 float(car_state.vCruise),
                 float(car_state.vCruiseCluster),
                 float(car_state.yawRate),
-                float(car_state.engineRpm),
+                float(self.field(car_state, 'engineRpm')),
                 float(car_state.cumLagMs),
                 float(car_state.fuelGauge),
             ],
@@ -336,8 +346,8 @@ class OpenPilotPredictionPublisher(Node):
                 float(car_state.steeringRateDeg),
                 float(car_state.steeringTorque),
                 float(car_state.steeringTorqueEps),
-                float(car_state.gas),
-                float(car_state.brake),
+                float(self.field(car_state, 'gas')),
+                float(self.field(car_state, 'brake')),
             ],
             self.car_state_steering_pub,
         )
@@ -348,7 +358,7 @@ class OpenPilotPredictionPublisher(Node):
                 float(car_state.cruiseState.speed),
                 float(car_state.cruiseState.speedCluster),
                 float(car_state.cruiseState.available),
-                float(car_state.cruiseState.speedOffset),
+                float(self.field(car_state.cruiseState, 'speedOffset')),
                 float(car_state.cruiseState.standstill),
                 float(car_state.cruiseState.nonAdaptive),
             ],
@@ -382,7 +392,7 @@ class OpenPilotPredictionPublisher(Node):
                 float(car_state.genericToggle),
                 float(car_state.doorOpen),
                 float(car_state.seatbeltUnlatched),
-                float(car_state.clutchPressed),
+                float(self.field(car_state, 'clutchPressed')),
                 float(car_state.leftBlindspot),
                 float(car_state.rightBlindspot),
                 float(car_state.charging),
@@ -409,11 +419,11 @@ class OpenPilotPredictionPublisher(Node):
                 float(car_control.actuators.accel),
                 float(car_control.actuators.gas),
                 float(car_control.actuators.brake),
-                float(car_control.actuators.steer),
+                float(self.field(car_control.actuators, 'torque', 'steer')),
                 float(car_control.actuators.steeringAngleDeg),
                 float(car_control.actuators.curvature),
                 float(car_control.actuators.speed),
-                float(car_control.actuators.steerOutputCan),
+                float(self.field(car_control.actuators, 'torqueOutputCan', 'steerOutputCan')),
                 self.to_float(car_control.actuators.longControlState),
             ],
             self.car_control_actuators_pub,

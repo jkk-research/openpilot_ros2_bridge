@@ -19,6 +19,10 @@ class OpenPilotPredictionVisualizer(Node):
         super().__init__("openpilot_prediction_visualizer")
         qos_profile = QoSProfile(depth=1)
 
+        # Markers are drawn in openpilot's calibrated frame (forward, right, down)
+        self.declare_parameter("openpilot_frame", "openpilot")
+        self.openpilot_frame = self.get_parameter("openpilot_frame").value
+
         # Publishers
         self.openpilot_plan_pub = self.create_publisher(MarkerArray, 'plan_markers', qos_profile)
         self.openpilot_lanes_pub = self.create_publisher(MarkerArray, 'lanes_markers', qos_profile)
@@ -35,7 +39,7 @@ class OpenPilotPredictionVisualizer(Node):
         self.latest_lane_line_probs = np.zeros(4, dtype=np.float32)
 
     def marker_header(self):
-        return Header(stamp=self.get_clock().now().to_msg(), frame_id='openpilot')
+        return Header(stamp=self.get_clock().now().to_msg(), frame_id=self.openpilot_frame)
 
     def position_callback(self, msg):
         position = float32_multiarray_to_numpy(msg)
@@ -44,8 +48,7 @@ class OpenPilotPredictionVisualizer(Node):
 
         plan_points = []
         for x, y, z, _ in position.T:
-            point_openpilot = Point(x=float(x), y=float(y), z=float(z))
-            plan_points.append(point_openpilot)
+            plan_points.append(openpilot_point(x, y, z))
 
         plan_marker_array = MarkerArray()
 
@@ -107,8 +110,7 @@ class OpenPilotPredictionVisualizer(Node):
         for i in range(lane_count):
             lane_points = []
             for x, y, z, _ in lane_lines[i].T:
-                point_openpilot = Point(x=float(x), y=float(y), z=float(z))
-                lane_points.append(point_openpilot)
+                lane_points.append(openpilot_point(x, y, z))
             # only visualize lane if its probability >= 30%
             prob = float(lane_lines_probs[i]) if i < lane_lines_probs.size else 0.0
             if prob < 0.3:
@@ -138,7 +140,7 @@ class OpenPilotPredictionVisualizer(Node):
         for i in range(edge_count):
             edge_points = []
             for x, y, z, _ in road_edges[i].T:
-                edge_points.append(Point(x=float(x), y=float(y), z=float(z)))
+                edge_points.append(openpilot_point(x, y, z))
 
             # Always visualize road edges regardless of std/probability
             alpha = 1.0
@@ -200,7 +202,7 @@ class OpenPilotPredictionVisualizer(Node):
 
             points = []
             for x, y in zip(xs, ys):
-                points.append(Point(x=float(x), y=float(y), z=0.0))
+                points.append(openpilot_point(x, y, 0.0))
 
             color = colors[i % len(colors)]
 
@@ -270,7 +272,7 @@ class OpenPilotPredictionVisualizer(Node):
                     for cx, cy in [(hx, hy), (hx, -hy), (-hx, -hy), (-hx, hy), (hx, hy)]:
                         rx = cx * math.cos(yaw) - cy * math.sin(yaw)
                         ry = cx * math.sin(yaw) + cy * math.cos(yaw)
-                        corners.append(Point(x=p0.x + rx, y=p0.y + ry, z=p0.z + 0.02))
+                        corners.append(Point(x=p0.x + rx, y=p0.y + ry, z=p0.z - 0.02))
 
                     foot_marker = Marker()
                     foot_marker.header = self.marker_header()
@@ -315,11 +317,15 @@ class OpenPilotPredictionVisualizer(Node):
                 # place label slightly above the sphere
                 text_marker.pose.position.x = p0.x
                 text_marker.pose.position.y = p0.y
-                text_marker.pose.position.z = p0.z + 0.7
+                text_marker.pose.position.z = p0.z - 0.7
                 leads_marker_array.markers.append(text_marker)
 
         self.openpilot_leads_pub.publish(leads_marker_array)
 
+
+def openpilot_point(x, y, z):
+    # The publisher negates x in its arrays; undo it to get a point in openpilot's calibrated frame
+    return Point(x=-float(x), y=float(y), z=float(z))
 
 def float32_multiarray_to_numpy(multiarray):
     dims = tuple(map(lambda x: x.size, multiarray.layout.dim))
