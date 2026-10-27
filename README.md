@@ -2,6 +2,42 @@
 
 ROS 2 bridge for Comma 3/X and Comma 4 devices running openpilot.
 
+## Quick start
+
+Both options need ROS 2 Jazzy, an openpilot checkout, and this package built in a ROS 2 workspace on the host:
+
+```bash
+cd /path/to/ros2_ws
+colcon build --symlink-install --packages-select openpilot_ros2_bridge
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+```
+
+### Option A: Docker (recommended)
+
+No Python setup on the host. The launch file pulls the prebuilt image and runs the bridge in a container:
+
+```bash
+ros2 launch openpilot_ros2_bridge openpilot_bridge_docker.launch.py \
+  host_openpilot_root:=/path/to/openpilot \
+  comma_ip:=<comma_device_ip>
+```
+
+To build the image from your local source instead, add `repo_root:=/path/to/openpilot_ros2_bridge image_name:=openpilot_ros2_bridge:local image_source:=build`.
+
+### Option B: Local install
+
+Build openpilot natively ([instructions](https://github.com/commaai/openpilot/tree/master/tools#native-setup-on-ubuntu-2404-and-macos)), create the bridge venv once with `./scripts/setup_bridge_venv.sh`, then:
+
+```bash
+export OPENPILOT_ROS2_BRIDGE_VENV=/path/to/openpilot_ros2_bridge/.venv
+ros2 launch openpilot_ros2_bridge openpilot_bridge.launch.py \
+  openpilot_root:=/path/to/openpilot \
+  comma_ip:=<comma_device_ip>
+```
+
+In both cases, the Comma device must also run its side of the bridge (`cd openpilot/cereal/messaging && ./bridge`). Alternatively, add `start_remote_bridge:=true remote_bridge_target:=comma@<comma_device_ip>` to start it over SSH. The sections below cover the details.
+
 ## What the bridge publishes
 
 The bridge now exposes:
