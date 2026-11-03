@@ -1,5 +1,5 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, TimerAction
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction, TimerAction
 from launch.conditions import IfCondition
 from launch.substitutions import EnvironmentVariable, LaunchConfiguration
 from ament_index_python.packages import get_package_share_directory
@@ -36,6 +36,29 @@ def _script_command(script_name, ros_arguments):
             ' ',
             *ros_arguments,
         ],
+    ]
+
+
+def _camera_publishers(context):
+    if not IfCondition(LaunchConfiguration('start_camera')).evaluate(context):
+        return []
+
+    cameras = [camera.strip() for camera in LaunchConfiguration('cameras').perform(context).split(',') if camera.strip()]
+    return [
+        ExecuteProcess(
+            cmd=_script_command(
+                'openpilot_camera_publisher.py',
+                [
+                    '-r __node:=openpilot_', camera, '_camera_publisher',
+                    ' -p camera:=', camera,
+                    ' -p openpilot_ip:=', LaunchConfiguration('camera_ip'),
+                    ' -p scale:=', LaunchConfiguration('camera_scale'),
+                    ' -p jpeg_quality:=', LaunchConfiguration('camera_jpeg_quality'),
+                ],
+            ),
+            output='screen',
+        )
+        for camera in cameras
     ]
 
 
@@ -118,15 +141,13 @@ def generate_launch_description():
         output='screen',
     )
 
-    camera_publisher = ExecuteProcess(
-        condition=IfCondition(LaunchConfiguration('start_camera')),
+    driver_monitoring_publisher = ExecuteProcess(
+        condition=IfCondition(LaunchConfiguration('start_driver_monitoring')),
         cmd=_script_command(
-            'openpilot_camera_publisher.py',
+            'openpilot_driver_monitoring_publisher.py',
             [
-                '-p openpilot_ip:=', LaunchConfiguration('camera_ip'),
-                ' -p camera_port:=', LaunchConfiguration('camera_port'),
-                ' -p camera_name:=', LaunchConfiguration('camera_name'),
-                ' -p image_format:=', LaunchConfiguration('image_format'),
+                '-p driver_state_port:=', LaunchConfiguration('driver_state_port'),
+                ' -p driver_monitoring_state_port:=', LaunchConfiguration('driver_monitoring_state_port'),
             ],
         ),
         output='screen',
@@ -144,7 +165,10 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument('comma_ip', default_value='127.0.0.1'),
         DeclareLaunchArgument('start_bridge', default_value='true'),
-        DeclareLaunchArgument('bridge_topics', default_value='modelV2,carControl,carState,longitudinalPlan,lateralPlan,liveCalibration,extrinsicsCalibration'),
+        DeclareLaunchArgument(
+            'bridge_topics',
+            default_value='modelV2,carControl,carState,longitudinalPlan,lateralPlan,liveCalibration,extrinsicsCalibration,driverStateV2,driverMonitoringState',
+        ),
         DeclareLaunchArgument('namespace', default_value='openpilot'),
         DeclareLaunchArgument('start_tf', default_value='true'),
         DeclareLaunchArgument('base_frame', default_value='base_link'),
@@ -166,12 +190,24 @@ def generate_launch_description():
         DeclareLaunchArgument('lateral_plan_port', default_value='lateralPlan'),
         DeclareLaunchArgument('car_state_port', default_value='carState'),
         DeclareLaunchArgument('car_control_port', default_value='carControl'),
+        DeclareLaunchArgument('start_driver_monitoring', default_value='true'),
+        DeclareLaunchArgument('driver_state_port', default_value='driverStateV2'),
+        DeclareLaunchArgument('driver_monitoring_state_port', default_value='driverMonitoringState'),
         DeclareLaunchArgument('start_camera', default_value='false'),
-        DeclareLaunchArgument('camera_ip', default_value='127.0.0.1'),
-        DeclareLaunchArgument('camera_port', default_value='8002'),
-        DeclareLaunchArgument('camera_name', default_value='roadCamera'),
-        DeclareLaunchArgument('image_format', default_value='jpeg'),
+        DeclareLaunchArgument('cameras', default_value='road'),
+        DeclareLaunchArgument('camera_ip', default_value=LaunchConfiguration('comma_ip')),
+        DeclareLaunchArgument('camera_scale', default_value='1.0'),
+        DeclareLaunchArgument('camera_jpeg_quality', default_value='80'),
         remote_bridge,
         local_bridge,
-        TimerAction(period=2.0, actions=[prediction_publisher, prediction_visualizer, tf_publisher, camera_publisher]),
+        TimerAction(
+            period=2.0,
+            actions=[
+                prediction_publisher,
+                prediction_visualizer,
+                tf_publisher,
+                driver_monitoring_publisher,
+                OpaqueFunction(function=_camera_publishers),
+            ],
+        ),
     ])
