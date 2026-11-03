@@ -25,6 +25,16 @@ RUN apt-get update && apt-get install -y \
     git-lfs \
     && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# CycloneDDS for hosts whose ROS 2 stack uses it, plus what scripts/build_openpilot_minimal.sh
+# needs to build msgq and the cereal bridge (libzmq is also the bridge's runtime dependency)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ros-jazzy-rmw-cyclonedds-cpp \
+    libzmq3-dev \
+    python3-dev \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN git config --system http.sslCAInfo /etc/ssl/certs/ca-certificates.crt
 
 # Use the ROS 2 desktop image default middleware
@@ -46,7 +56,7 @@ RUN chmod +x /workspace/ros2_ws/src/openpilot_ros2_bridge/docker/*.sh /workspace
 RUN python3 -m venv --system-site-packages /workspace/ros2_ws/src/openpilot_ros2_bridge/.venv && \
     source /workspace/ros2_ws/src/openpilot_ros2_bridge/.venv/bin/activate && \
     python3 -m pip install --upgrade pip && \
-    python3 -m pip install -r /workspace/ros2_ws/src/openpilot_ros2_bridge/requirements.txt
+    python3 -m pip install -r /workspace/ros2_ws/src/openpilot_ros2_bridge/requirements.txt cython==3.0.11
 
 # 4. Set up environment variables and sourcing for bash
 RUN echo "source /opt/ros/jazzy/setup.bash" >> /root/.bashrc && \

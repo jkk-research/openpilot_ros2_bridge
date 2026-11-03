@@ -11,6 +11,8 @@ ROS_DISTRO_NAME="$7"
 HOST_OPENPILOT_ROOT="$8"
 shift 8
 
+PUBLISHED_IMAGE="ghcr.io/jkk-research/openpilot_ros2_bridge:latest"
+
 # Optional settings passed through the environment by openpilot_bridge_docker.launch.py
 COMMA_TARGET="${COMMA_TARGET:-}"
 COMMA_OPENPILOT_DIR="${COMMA_OPENPILOT_DIR:-/data/openpilot}"
@@ -35,18 +37,31 @@ fi
 # Stop a previous bridge first: it may be using the openpilot build that gets refreshed below
 docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
 
+pull_image() {
+  if docker pull "${IMAGE_NAME}"; then
+    return
+  fi
+  # Keep working offline (e.g. in the car) with the image pulled last time
+  if docker image inspect "${IMAGE_NAME}" >/dev/null 2>&1; then
+    echo "Could not pull ${IMAGE_NAME}; using the copy already on this machine" >&2
+  else
+    echo "Could not pull ${IMAGE_NAME}, and it is not on this machine yet" >&2
+    exit 1
+  fi
+}
+
 case "${IMAGE_SOURCE}" in
   build)
     docker build -t "${IMAGE_NAME}" -f "${REPO_ROOT}/docker/Dockerfile" "${REPO_ROOT}"
     ;;
   cyclone)
-    # Published image + CycloneDDS + build tools; only built when missing
-    if ! docker image inspect "${IMAGE_NAME}" >/dev/null 2>&1; then
-      docker build -t "${IMAGE_NAME}" -f "${REPO_ROOT}/docker/Dockerfile.cyclone" "${REPO_ROOT}/docker"
-    fi
+    # The published image now includes CycloneDDS and the openpilot build tools, so there is nothing to build
+    echo "image_source:=cyclone is no longer needed; using ${PUBLISHED_IMAGE} instead of ${IMAGE_NAME}" >&2
+    IMAGE_NAME="${PUBLISHED_IMAGE}"
+    pull_image
     ;;
   *)
-    docker pull "${IMAGE_NAME}"
+    pull_image
     ;;
 esac
 
@@ -115,9 +130,13 @@ elif [[ ! -d "${HOST_OPENPILOT_ROOT}/openpilot" ]]; then
   exit 1
 fi
 
+# Run as the host user: /dev/shm is shared, and a root container can't use the host user's
+# Fast DDS shared memory (so host nodes get no data) and leaves root-owned files behind
 DOCKER_ARGS=(
   --rm
   --name "${CONTAINER_NAME}"
+  --user "$(id -u):$(id -g)"
+  -e HOME=/tmp
   --network host
   --ipc host
   --add-host host.docker.internal:host-gateway

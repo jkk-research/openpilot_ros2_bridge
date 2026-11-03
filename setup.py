@@ -16,7 +16,7 @@ setup(
         (f'share/{package_name}/scripts', ['scripts/setup_bridge_venv.sh', 'scripts/build_openpilot_minimal.sh']),
         (f'share/{package_name}/scripts', glob('openpilot/*.py')),
         (f'share/{package_name}/cereal', glob('cereal/*.capnp')),
-        (f'share/{package_name}/docker', ['docker/Dockerfile', 'docker/Dockerfile.cyclone', 'docker/run_openpilot_bridge_container.sh', 'docker/run_openpilot_bridge_host.sh']),
+        (f'share/{package_name}/docker', ['docker/Dockerfile', 'docker/run_openpilot_bridge_container.sh', 'docker/run_openpilot_bridge_host.sh']),
         (f'share/{package_name}', ['requirements.txt']),
     ],
     install_requires=['setuptools'],

@@ -1,8 +1,9 @@
+import os
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess
 from launch.conditions import IfCondition
 from launch.substitutions import EnvironmentVariable, LaunchConfiguration
-from ament_index_python.packages import get_package_share_directory
 
 
 _FORWARDED_ARGS = [
@@ -23,8 +24,10 @@ def _launch_args():
 
 
 def generate_launch_description():
-    package_share = get_package_share_directory('openpilot_ros2_bridge')
-    host_runner = f'{package_share}/docker/run_openpilot_bridge_host.sh'
+    # Relative to this file, so the launch also runs straight from a checkout without a colcon build
+    host_runner = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'docker', 'run_openpilot_bridge_host.sh'
+    )
 
     remote_bridge = ExecuteProcess(
         condition=IfCondition(LaunchConfiguration('start_remote_bridge')),

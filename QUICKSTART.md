@@ -27,28 +27,29 @@ If SSH fails, here is what each error means:
 
 ## 2. Start the driver
 
-Build the package once (`colcon build --symlink-install --packages-select openpilot_ros2_bridge`). Then, in a shell that has your stack's ROS settings (`ROS_DOMAIN_ID`, `RMW_IMPLEMENTATION`, `CYCLONEDDS_URI`), run:
+Nothing needs to be built: the launch file runs straight from your clone of this repository (here `~/ros2_ws/src/openpilot_ros2_bridge`), and the image comes prebuilt from GHCR.
+In a shell that has your stack's ROS settings (`ROS_DOMAIN_ID`, `RMW_IMPLEMENTATION`, `CYCLONEDDS_URI`), run:
 
 ```bash
 source /opt/ros/humble/setup.bash
-source ~/ros2_ws/install/setup.bash
-ros2 launch openpilot_ros2_bridge openpilot_bridge_docker.launch.py \
+ros2 launch ~/ros2_ws/src/openpilot_ros2_bridge/launch/openpilot_bridge_docker.launch.py \
   comma_ip:=192.168.10.26 start_remote_bridge:=true \
-  image_source:=cyclone image_name:=openpilot_ros2_bridge:cyclone \
-  host_openpilot_root:=$HOME/openpilot prepare_openpilot:=true mount_source:=true \
+  host_openpilot_root:=$HOME/openpilot prepare_openpilot:=true \
   base_frame:=lexus3/base_link device_x:=1.6 device_y:=0 base_frame_height:=0.37
 ```
+
+If you have built the package in a workspace, `ros2 launch openpilot_ros2_bridge openpilot_bridge_docker.launch.py ...` with the same arguments works too.
 
 The launch file does the following, and does each step only when it's needed:
 
 1. **Comma side:** starts `cereal/messaging/bridge` on the Comma over SSH, unless it's already running there. It stops again when you stop the launch.
-2. **Image** (`image_source:=cyclone`): builds `openpilot_ros2_bridge:cyclone` from `docker/Dockerfile.cyclone` if that image doesn't exist yet. It's the published image plus CycloneDDS and build tools.
+2. **Image:** pulls `ghcr.io/jkk-research/openpilot_ros2_bridge:latest`, which already includes CycloneDDS and the build tools. Nothing is built. When the PC is offline, it uses the image it pulled last time.
 3. **openpilot checkout** (`prepare_openpilot:=true`): reads the Comma's openpilot repository and commit over SSH.
    - If `host_openpilot_root` is missing, it creates a checkout there.
    - If the checkout is on a different commit and has no local changes, it switches to the Comma's commit.
-   - It builds only msgq and `cereal/messaging/bridge`, and only when the commit changed since the last build.
+   - It builds only msgq and `cereal/messaging/bridge`, inside the published image, and only when the commit changed since the last build.
    - If SSH fails, it uses the checkout as it is.
-4. **Driver:** starts the container. It runs on your `RMW_IMPLEMENTATION`, `ROS_DOMAIN_ID` and `CYCLONEDDS_URI`; the CycloneDDS profile is mounted automatically. With `mount_source:=true`, it runs this repository's scripts and launch files rather than the copies baked into the image.
+4. **Driver:** starts the container. It runs on your `RMW_IMPLEMENTATION`, `ROS_DOMAIN_ID` and `CYCLONEDDS_URI`; the CycloneDDS profile is mounted automatically.
 
 Set these for your car:
 
@@ -68,6 +69,9 @@ Other useful arguments:
 | `remote_bridge_target:=comma@<ip>` | SSH user and host. Defaults to `comma@<comma_ip>`. |
 | `cyclonedds_uri:=file:///path.xml` | Overrides `CYCLONEDDS_URI`. |
 | `start_tf:=false` | Turns off the TF frames. |
+| `start_camera:=true cameras:=road,wide_road,driver` | Streams the cameras to `/openpilot/<camera>_camera/image_raw` and `.../compressed`. |
+| `start_driver_monitoring:=false` | Turns off the driver monitoring topics. |
+| `mount_source:=true` | Runs this repository's scripts and launch files instead of the copies in the image, for testing local changes. |
 
 ## 3. Check it
 
@@ -85,6 +89,8 @@ Expected rates:
 |---|---|
 | modelV2-based topics and markers | ~20 Hz |
 | `car_state_*`, `car_control_*` | ~100 Hz |
+| `driver_*` | ~20 Hz |
+| `*_camera/image_raw*` (with `start_camera:=true`) | ~20 Hz while onroad |
 | `temporal_pose_*`, `lateral_plan_*` | silent on openpilot versions that no longer publish them |
 
 The topics show up in `ros2 topic list`, but the driver's nodes won't appear in `ros2 node list` from a Humble host. That's expected: the container runs Jazzy, and Humble can't decode its node info.

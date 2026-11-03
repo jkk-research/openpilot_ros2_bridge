@@ -6,32 +6,31 @@ ROS 2 bridge for Comma 3/X and Comma 4 devices running openpilot.
 
 To run on a vehicle PC whose ROS 2 stack uses CycloneDDS, including SSH setup for the Comma, see [QUICKSTART.md](QUICKSTART.md).
 
-Both options need ROS 2 Jazzy, an openpilot checkout, and this package built in a ROS 2 workspace on the host:
+### Option A: Docker (recommended)
+
+Nothing to build. The launch file runs straight from this checkout, and the published image already contains the bridge, its Python packages, and CycloneDDS.
+The host only needs Docker, ROS 2 (Humble or newer) to run `ros2 launch`, and an openpilot checkout:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+ros2 launch /path/to/openpilot_ros2_bridge/launch/openpilot_bridge_docker.launch.py \
+  host_openpilot_root:=/path/to/openpilot \
+  comma_ip:=<comma_device_ip>
+```
+
+- If the openpilot checkout isn't built, add `prepare_openpilot:=true`. The launch then checks it out at the Comma's commit and builds the two parts the bridge uses, msgq and the cereal bridge, inside the container. This needs SSH access to the Comma; see [QUICKSTART.md](QUICKSTART.md).
+- If the image can't be pulled, for example offline in the car, the launch uses the copy pulled last time.
+- To use an image built from your local source instead, add `image_name:=openpilot_ros2_bridge:local image_source:=build`.
+
+### Option B: Local install
+
+Build openpilot natively ([instructions](https://github.com/commaai/openpilot/tree/master/tools#native-setup-on-ubuntu-2404-and-macos)) and create the bridge venv once with `./scripts/setup_bridge_venv.sh`. Then build this package in a ROS 2 Jazzy workspace and launch it:
 
 ```bash
 cd /path/to/ros2_ws
 colcon build --symlink-install --packages-select openpilot_ros2_bridge
 source /opt/ros/jazzy/setup.bash
 source install/setup.bash
-```
-
-### Option A: Docker (recommended)
-
-No Python setup on the host. The launch file pulls the prebuilt image and runs the bridge in a container:
-
-```bash
-ros2 launch openpilot_ros2_bridge openpilot_bridge_docker.launch.py \
-  host_openpilot_root:=/path/to/openpilot \
-  comma_ip:=<comma_device_ip>
-```
-
-To build the image from your local source instead, add `repo_root:=/path/to/openpilot_ros2_bridge image_name:=openpilot_ros2_bridge:local image_source:=build`.
-
-### Option B: Local install
-
-Build openpilot natively ([instructions](https://github.com/commaai/openpilot/tree/master/tools#native-setup-on-ubuntu-2404-and-macos)), create the bridge venv once with `./scripts/setup_bridge_venv.sh`, then:
-
-```bash
 export OPENPILOT_ROS2_BRIDGE_VENV=/path/to/openpilot_ros2_bridge/.venv
 ros2 launch openpilot_ros2_bridge openpilot_bridge.launch.py \
   openpilot_root:=/path/to/openpilot \
@@ -231,62 +230,59 @@ docker build -t openpilot_ros2_bridge:local -f docker/Dockerfile .
 Validate ROS 2 and openpilot inside the container:
 
 ```bash
-docker run --rm --network host --ipc host \
+docker run --rm --network host --ipc host --user "$(id -u):$(id -g)" -e HOME=/tmp \
   -v /path/to/openpilot:/workspace/openpilot \
-  openpilot_ros2_bridge:local \
+  ghcr.io/jkk-research/openpilot_ros2_bridge:latest \
   bash -lc 'source /opt/ros/jazzy/setup.bash && \
             source /workspace/ros2_ws/src/openpilot_ros2_bridge/.venv/bin/activate && \
             source /workspace/ros2_ws/install/setup.bash && \
-            export PYTHONPATH=/workspace/openpilot/openpilot:${PYTHONPATH} && \
-            python3 -c "import rclpy, cereal.messaging; print(\"ROS 2 and openpilot imports OK\")" && \
+            export PYTHONPATH=/workspace/openpilot:/workspace/openpilot/openpilot:/workspace/openpilot/opendbc_repo:/workspace/openpilot/msgq_repo:${PYTHONPATH} && \
+            python3 -c "import rclpy, av, cereal.messaging; print(\"ROS 2 and openpilot imports OK\")" && \
             ros2 pkg prefix openpilot_ros2_bridge && \
-            test -x /workspace/openpilot/cereal/messaging/bridge'
+            { test -x /workspace/openpilot/openpilot/cereal/messaging/bridge || test -x /workspace/openpilot/cereal/messaging/bridge; } && \
+            echo "cereal bridge found"'
 ```
 
-Launch the containerized bridge directly from a ROS 2 launch file on the host:
+Launch the containerized bridge from the host. No colcon build is needed when you run the launch file by path:
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-source /path/to/ros2_ws/install/setup.bash
 
-ros2 launch openpilot_ros2_bridge openpilot_bridge_docker.launch.py \
+ros2 launch /path/to/openpilot_ros2_bridge/launch/openpilot_bridge_docker.launch.py \
   host_openpilot_root:=/path/to/openpilot \
-  image_name:=ghcr.io/jkk-research/openpilot_ros2_bridge:latest \
-  image_source:=pull \
   comma_ip:=<comma_device_ip> \
-  ros_domain_id:=0 \
-  start_bridge:=true
+  ros_domain_id:=0
 ```
 
-For local development from source, swap to:
+For local development from source, build the image from this checkout instead of pulling it:
 
 ```bash
-ros2 launch openpilot_ros2_bridge openpilot_bridge_docker.launch.py \
-  repo_root:=/path/to/openpilot_ros2_bridge \
+ros2 launch /path/to/openpilot_ros2_bridge/launch/openpilot_bridge_docker.launch.py \
   host_openpilot_root:=/path/to/openpilot \
   image_name:=openpilot_ros2_bridge:local \
   image_source:=build
 ```
 
-The Docker launch file either pulls or builds the image, starts the container with `--network host` and `--ipc host`, forwards `ROS_DOMAIN_ID` and `RMW_IMPLEMENTATION`, and then runs the in-container `openpilot_bridge.launch.py`.
+The Docker launch file pulls (or builds) the image, starts the container with `--network host` and `--ipc host`, forwards `ROS_DOMAIN_ID`, `RMW_IMPLEMENTATION` and `CYCLONEDDS_URI`, and then runs the in-container `openpilot_bridge.launch.py`.
+The container runs as your user. A root container can't share Fast DDS shared memory with your host nodes, so they would see topics but receive no data.
+Inside the container, msgq uses its own `OPENPILOT_PREFIX`, so it never touches the queues of an openpilot running natively on the host.
 
 For a quick runtime smoke test without a Comma device connection:
 
 ```bash
-docker run --rm --network host --ipc host openpilot_ros2_bridge:local \
+docker run --rm --network host --ipc host --user "$(id -u):$(id -g)" -e HOME=/tmp \
   -v /path/to/openpilot:/workspace/openpilot \
-  bash -lc 'source /opt/ros/jazzy/setup.bash && \
-            source /workspace/ros2_ws/src/openpilot_ros2_bridge/.venv/bin/activate && \
-            source /workspace/ros2_ws/install/setup.bash && \
-            export PYTHONPATH=/workspace/openpilot/openpilot:${PYTHONPATH} && \
-            timeout 15 ros2 launch openpilot_ros2_bridge openpilot_bridge.launch.py start_bridge:=false start_camera:=false'
+  ghcr.io/jkk-research/openpilot_ros2_bridge:latest \
+  timeout 15 bash /workspace/ros2_ws/src/openpilot_ros2_bridge/docker/run_openpilot_bridge_container.sh \
+    start_bridge:=false start_camera:=false
 ```
 
 ## Published container image
 
-The repository now includes `/home/runner/work/openpilot_ros2_bridge/openpilot_ros2_bridge/.github/workflows/publish-docker.yml`, which publishes the Docker image to GHCR on pushes to `main`, version tags, and manual runs.
+`.github/workflows/publish-docker.yml` publishes the Docker image to GHCR on pushes to `main`, version tags, and manual runs.
+The image includes CycloneDDS and the tools `prepare_openpilot` needs, so no local image build is required.
 
-After the workflow publishes an image, users can pull it with:
+To pull it by hand:
 
 ```bash
 docker pull ghcr.io/jkk-research/openpilot_ros2_bridge:latest

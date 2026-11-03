@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Minimal openpilot build for the bridge: msgq (lib + python ext) and cereal/messaging/bridge only.
-# Run inside the openpilot_ros2_bridge:cyclone image with the openpilot checkout mounted at /workspace/openpilot:
+# Run inside the published bridge image with the openpilot checkout mounted at /workspace/openpilot:
 #   docker run --rm --user "$(id -u):$(id -g)" -v ~/openpilot:/workspace/openpilot \
-#     -v "$PWD/scripts/build_openpilot_minimal.sh:/build.sh:ro" openpilot_ros2_bridge:cyclone bash /build.sh
+#     -v "$PWD/scripts/build_openpilot_minimal.sh:/build.sh:ro" ghcr.io/jkk-research/openpilot_ros2_bridge:latest bash /build.sh
 set -euo pipefail
 cd "${OPENPILOT_ROOT:-/workspace/openpilot}"
 VENV="${BRIDGE_VENV:-/workspace/ros2_ws/src/openpilot_ros2_bridge/.venv}"
