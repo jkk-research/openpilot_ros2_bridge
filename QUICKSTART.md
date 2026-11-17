@@ -71,6 +71,7 @@ Other useful arguments:
 | `start_tf:=false` | Turns off the TF frames. |
 | `start_camera:=true cameras:=road,wide_road,driver` | Streams the cameras to `/openpilot/<camera>_camera/image_raw` and `.../compressed`. |
 | `start_driver_monitoring:=false` | Turns off the driver monitoring topics. |
+| `start_drivetrain:=false` | Turns off the drivetrain topics, including the decoded CAN messages. |
 | `mount_source:=true` | Runs this repository's scripts and launch files instead of the copies in the image, for testing local changes. |
 
 ## 3. Check it
@@ -90,6 +91,8 @@ Expected rates:
 | modelV2-based topics and markers | ~20 Hz |
 | `car_state_*`, `car_control_*` | ~100 Hz |
 | `driver_*` | ~20 Hz |
+| `drivetrain_state`, `drivetrain_command` | ~100 Hz |
+| `drivetrain_can/*` | each message's CAN rate, starting after the first `carParams` (up to 50 s) |
 | `*_camera/image_raw*` (with `start_camera:=true`) | ~20 Hz while onroad |
 | `temporal_pose_*`, `lateral_plan_*` | silent on openpilot versions that no longer publish them |
 

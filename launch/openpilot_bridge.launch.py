@@ -153,6 +153,23 @@ def generate_launch_description():
         output='screen',
     )
 
+    drivetrain_publisher = ExecuteProcess(
+        condition=IfCondition(LaunchConfiguration('start_drivetrain')),
+        cmd=_script_command(
+            'openpilot_drivetrain_publisher.py',
+            [
+                '-p car_state_port:=', LaunchConfiguration('car_state_port'),
+                ' -p car_output_port:=', LaunchConfiguration('car_output_port'),
+                ' -p car_params_port:=', LaunchConfiguration('car_params_port'),
+                ' -p can_port:=', LaunchConfiguration('can_port'),
+                ' -p can_dbc:=', LaunchConfiguration('drivetrain_can_dbc'),
+                ' -p can_bus:=', LaunchConfiguration('drivetrain_can_bus'),
+                ' -p can_messages:=', LaunchConfiguration('drivetrain_can_messages'),
+            ],
+        ),
+        output='screen',
+    )
+
     return LaunchDescription([
         DeclareLaunchArgument('ros_distro', default_value='jazzy'),
         DeclareLaunchArgument('openpilot_root', default_value='/workspace/openpilot'),
@@ -167,7 +184,7 @@ def generate_launch_description():
         DeclareLaunchArgument('start_bridge', default_value='true'),
         DeclareLaunchArgument(
             'bridge_topics',
-            default_value='modelV2,carControl,carState,longitudinalPlan,lateralPlan,liveCalibration,extrinsicsCalibration,driverStateV2,driverMonitoringState',
+            default_value='modelV2,carControl,carState,longitudinalPlan,lateralPlan,liveCalibration,extrinsicsCalibration,driverStateV2,driverMonitoringState,carOutput,carParams,can',
         ),
         DeclareLaunchArgument('namespace', default_value='openpilot'),
         DeclareLaunchArgument('start_tf', default_value='true'),
@@ -193,6 +210,13 @@ def generate_launch_description():
         DeclareLaunchArgument('start_driver_monitoring', default_value='true'),
         DeclareLaunchArgument('driver_state_port', default_value='driverStateV2'),
         DeclareLaunchArgument('driver_monitoring_state_port', default_value='driverMonitoringState'),
+        DeclareLaunchArgument('start_drivetrain', default_value='true'),
+        DeclareLaunchArgument('car_output_port', default_value='carOutput'),
+        DeclareLaunchArgument('car_params_port', default_value='carParams'),
+        DeclareLaunchArgument('can_port', default_value='can'),
+        DeclareLaunchArgument('drivetrain_can_dbc', default_value='auto'),
+        DeclareLaunchArgument('drivetrain_can_bus', default_value='-1'),
+        DeclareLaunchArgument('drivetrain_can_messages', default_value='default'),
         DeclareLaunchArgument('start_camera', default_value='false'),
         DeclareLaunchArgument('cameras', default_value='road'),
         DeclareLaunchArgument('camera_ip', default_value=LaunchConfiguration('comma_ip')),
@@ -207,6 +231,7 @@ def generate_launch_description():
                 prediction_visualizer,
                 tf_publisher,
                 driver_monitoring_publisher,
+                drivetrain_publisher,
                 OpaqueFunction(function=_camera_publishers),
             ],
         ),

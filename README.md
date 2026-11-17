@@ -39,7 +39,7 @@ ros2 launch openpilot_ros2_bridge openpilot_bridge.launch.py \
 
 In both cases, the Comma device must also run its side of the bridge (`cd openpilot/cereal/messaging && ./bridge`). Alternatively, add `start_remote_bridge:=true remote_bridge_target:=comma@<comma_device_ip>` to start it over SSH. The sections below cover the details.
 
-Driver monitoring topics are published by default. To also stream the cameras, add `start_camera:=true cameras:=road,wide_road,driver` (see [Cameras](#cameras)).
+Driver monitoring and drivetrain topics are published by default (see [Drivetrain](#drivetrain)). To also stream the cameras, add `start_camera:=true cameras:=road,wide_road,driver` (see [Cameras](#cameras)).
 
 ## What the bridge publishes
 
@@ -52,6 +52,7 @@ The bridge now exposes:
 - RViz marker topics for plan, lane lines, road edges, and leads
 - TF frames for openpilot's calibrated frame and the Comma device, driven by openpilot calibration
 - driver monitoring model output (`driverStateV2`) and policy state (`driverMonitoringState`)
+- drivetrain state from `carState`, `carOutput` and `carParams`, plus drivetrain CAN messages (engine RPM, pedal positions, brake force, gear and more) decoded with opendbc
 - optional road, wide road, and driver camera streams as raw and JPEG-compressed images
 
 All topics are published under the `openpilot` namespace (for example `/openpilot/lane_lines`). Change it with `namespace:=<name>`.
@@ -105,9 +106,11 @@ Useful optional arguments:
 
 - `start_remote_bridge:=true`
 - `remote_bridge_target:=comma@<comma_device_ip>`
-- `bridge_topics:=modelV2,carControl,carState,longitudinalPlan,lateralPlan,liveCalibration,extrinsicsCalibration,driverStateV2,driverMonitoringState`
+- `bridge_topics:=modelV2,carControl,carState,longitudinalPlan,lateralPlan,liveCalibration,extrinsicsCalibration,driverStateV2,driverMonitoringState,carOutput,carParams,can`
 - `namespace:=openpilot`
 - `start_driver_monitoring:=false`
+- `start_drivetrain:=false`
+- `drivetrain_can_messages:=ENGINE_RPM,GEAR_PACKET`
 - `start_camera:=true`
 - `cameras:=road,wide_road,driver`
 - `camera_ip:=<comma_device_ip>` (defaults to `comma_ip`)
@@ -214,6 +217,76 @@ Policy state (`driverMonitoringState`):
 | `driver_monitoring_vision` | 18 | awareness percent, awareness step, is distracted, face detected, distracted by pose / eye / phone / sleep, pose pitch, pose yaw, pose calibrated, pose uncertainty, pitch calibrated percent, pitch offset, yaw calibrated percent, yaw offset, wheeltouch fallback percent, uncertain offroad alert percent |
 | `driver_monitoring_wheeltouch` | 3 | awareness percent, awareness step, driver interacting |
 | `driver_monitoring_legacy_state` | 15 | Only for older openpilot versions: face detected, is distracted, distracted type, awareness status, awareness active, awareness passive, step change, pose pitch offset, pose pitch valid count, pose yaw offset, pose yaw valid count, is low std, hi std count, is active mode, is RHD |
+
+## Drivetrain
+
+The drivetrain node is on by default (`start_drivetrain:=true`).
+It reads `carState`, `carOutput`, `carParams` and the raw `can` stream through the local bridge, so keep all four in `bridge_topics` if you override it.
+If you turn the node off, you can drop `carOutput`, `carParams` and `can` from `bridge_topics`. Keep `carState`, because the `car_state_*` topics use it. The raw `can` stream is the largest of them: 100 batches per second, about 100 kB/s on a Lexus RX.
+
+### From openpilot's car interface
+
+These work on every car. All are `std_msgs/Float32MultiArray` except `drivetrain_car`.
+
+| Topic | Shape | Contents |
+| --- | --- | --- |
+| `drivetrain_state` | 16 | gear shifter (0 unknown, 1 park, 2 drive, 3 neutral, 4 reverse, 5 sport, 6 low, 7 brake, 8 eco, 9 manumatic), speed (m/s), acceleration (m/s²), raw speed (m/s), standstill, gas pressed, brake pressed, regen braking, parking brake, brake hold active, cruise enabled, cruise available, fuel or battery level (0-1), charging, engine RPM, clutch pressed |
+| `drivetrain_command` | 5 | what openpilot actually sent to the car, after the car's limits (`carOutput`): acceleration (m/s²), gas, brake, longitudinal control state (0 off, 1 pid, 2 stopping, 3 starting), speed (m/s). Gas and brake are in the car's own command units: 0-1 on Honda Nidec, raw CAN values on GM and Honda Bosch, m/s² on Ford, and 0 on most other cars, Toyota included |
+| `drivetrain_params` | 11 | latched, from `carParams` (every 50 s): transmission type (0 unknown, 1 automatic, 2 manual, 3 direct drive, 4 CVT), mass (kg), wheelbase (m), center of mass to front axle (m), steer ratio, wheel speed factor, minimum enable speed (m/s), openpilot longitudinal control, PCM cruise, stop acceleration (m/s²), longitudinal actuator delay (s) |
+| `drivetrain_car` | String | latched: brand, fingerprint, and the DBC, bus and messages used for CAN decoding |
+
+Current openpilot versions no longer report engine RPM or the clutch in `carState`, so those two fields are NaN there.
+The CAN topics below carry the engine RPM on most combustion and hybrid cars; the exceptions are Nissan, Hyundai/Kia CAN-FD, Chrysler CUSW and Volkswagen MQB/PQ.
+
+### From the raw CAN bus
+
+The node decodes the car's drivetrain messages with opendbc, using the DBC that opendbc assigns to the car's fingerprint.
+It waits for the first `carParams` to know the car, which takes up to 50 s after start.
+Each message is published on `drivetrain_can/<message name in lower case>`, for example `/openpilot/drivetrain_can/engine_rpm`.
+The data holds the message's signals in DBC order and DBC units, and the layout label lists the signal names in the same order (`RPM,ENGINE_RUNNING`).
+Frames with a bad checksum are dropped where opendbc checks the brand's checksum (Toyota, Honda, Hyundai CAN-FD, Volkswagen, Subaru global, Chrysler and Tesla among them), and counter errors drop frames only after several in a row.
+GM, Hyundai/Kia CAN, Mazda, Nissan and Subaru pre-global frames are not checked, and their checksum and counter signals are published as data.
+If the Comma reports a different car, the node switches to that car's DBC.
+This needs openpilot 0.10.0 or newer, whose opendbc has the pure-Python CAN parser; with older versions the node logs a warning and publishes only the topics above.
+On openpilot 0.11.0 and older, opendbc's `*_generated` DBC files only exist after a full openpilot build.
+
+Default messages per opendbc brand. A brand's list covers all its DBC variants, and the node keeps the ones the car's DBC defines:
+
+| Brand | Default messages |
+| --- | --- |
+| Toyota, Lexus | `ENGINE_RPM`, `GAS_PEDAL`, `GAS_PEDAL_HYBRID`, `BRAKE_MODULE`, `BRAKE`, `GEAR_PACKET`, `GEAR_PACKET_HYBRID`, `CLUTCH` |
+| BYD | `DRIVE_STATE`, `PEDAL` |
+| Chrysler | `ECM_1`, `ECM_5`, `ESP_8`, `Transmission_Status`, `GEAR`, `EPB_1`, `ACCEL_GAS`, `BRAKE_1` |
+| Ford | `EngVehicleSpThrottle`, `EngBrakeData`, `ABS_BrkBst_Data`, `BrakeSnData_4`, `PowertrainData_10`, `VehicleOperatingModes`, `DesiredTorqBrk` |
+| GM | `ECMEngineStatus`, `AcceleratorPedal2`, `ECMAcceleratorPos`, `ECMPRDNL2`, `EBCMRegenPaddle`, `BECMBatteryVoltageCurrent`, `BCMGeneralPlatformStatus` |
+| Honda, Acura | `ENGINE_DATA`, `POWERTRAIN_DATA`, `GAS_PEDAL_2`, `VSA_STATUS`, `GEARBOX_AUTO`, `GEARBOX_CVT`, `EPB_STATUS`, `GEARBOX_ALT_2` |
+| Hyundai, Kia, Genesis | `TCS13`, `E_EMS11`, `EMS12`, `EMS11`, `EMS_366`, `ESP12`, `ACCELERATOR`, `ACCELERATOR_ALT`, `GEAR_SHIFTER`, `BRAKE`, `LVR12`, `ELECT_GEAR`, `TCU12`, `CLU15`, `EMS20`, `FCEV_ACCELERATOR`, `GEAR_ALT`, `GEAR_ALT_2` |
+| Mazda | `ENGINE_DATA`, `GEAR`, `BRAKE`, `EPB` |
+| MG | `GW_HSC2_HCU_FrP00`, `EHBS_HSC2_FrP00`, `GW_HSC2_ECM_FrP04` |
+| Nissan | `CRUISE_THROTTLE`, `GAS_PEDAL`, `BRAKE_PEDAL`, `GEARBOX` |
+| PSA (Peugeot) | `Dyn_CMM`, `Dyn2_FRE`, `Dyn_EasyMove` |
+| Rivian | `VDM_PropStatus`, `iBESP2`, `ESP_Status`, `ESP_Brake_Pressure`, `VDM_Torque_Front`, `VDM_Torque_Rear`, `ESP_EpbStatus`, `VDM_ModSw_DrvModPosSts_GW` |
+| Subaru | `Throttle`, `Transmission`, `Brake_Pedal`, `Throttle_Hybrid` |
+| Tesla | `DI_systemStatus`, `DI_torque`, `ESP_status`, `IBST_status`, `DI_state` |
+| Volkswagen group | `Motor_14`, `Motor_20`, `ESP_05`, `Getriebe_11`, `Motor_51`, `ESC_50`, `Motor_EV_01`, `Motor_3`, `Motor_03`, `Getriebe_1` |
+
+Toyota and Lexus defaults are checked against logs from a Lexus RX hybrid.
+There, `ENGINE_RPM` arrives at 42 Hz, `GEAR_PACKET_HYBRID` at 61 Hz with `FDRVREAL` as the driving force at the wheels in N (negative under regen), and `BRAKE` at 80 Hz with `BRAKE_FORCE` as the friction brake force in N.
+`ENGINE_RUNNING` stays 0 on that car, so use `RPM`.
+Non-hybrids send `GAS_PEDAL` instead of `GAS_PEDAL_HYBRID` (accelerator 0-1). On most models it carries the accelerator in % and the engine torque in Nm; on the SecOC models (RAV4 Prime, Sienna, Yaris) it is a different message with `GAS_PEDAL_USER`.
+`GEAR_PACKET` `GEAR` is 0 D, 1 S, 8 N, 16 R, 32 P; `GEAR_PACKET_HYBRID` `GEAR` is 0 P, 1 R, 2 N, 3 D, 4 B.
+
+The other brands' defaults are checked against opendbc's DBC files and car code, not on real cars.
+Frames are read from CAN bus 0, with opendbc's exceptions: Honda Bosch cars with a radar and Hyundai CAN-FD cars with LKA steering use bus 1 (from the `carParams` flags), and so do the Nissan Altima and Subaru hybrids.
+Some cars split their drivetrain messages over two buses, Subaru hybrids for example; use `drivetrain_can_bus` and `drivetrain_can_messages` to pick the other ones.
+
+A message that the car doesn't send never publishes.
+
+Useful arguments:
+
+- `drivetrain_can_messages:=ENGINE_RPM,GEAR_PACKET`: publish these DBC messages instead of the defaults.
+- `drivetrain_can_dbc:=toyota_tnga_k_pt_generated`: use this opendbc DBC name (the `dbc=` value that `drivetrain_car` shows) instead of looking it up from the fingerprint. Decoding then starts without waiting for `carParams`, but without the car's flags: Honda Bosch cars with a radar, Hyundai CAN-FD cars with LKA steering and the Nissan Altima also need `drivetrain_can_bus:=1`.
+- `drivetrain_can_bus:=0`: decode frames from this CAN bus instead of the brand's default.
 
 ## Virtual environment / container workflow
 
