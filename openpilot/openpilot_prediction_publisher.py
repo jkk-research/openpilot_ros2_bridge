@@ -5,6 +5,7 @@ import rclpy
 import numpy as np
 import threading
 import cereal.messaging as messaging
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from std_msgs.msg import MultiArrayDimension
 from std_msgs.msg import Float32MultiArray
@@ -467,11 +468,11 @@ def main(args=None):
     
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

@@ -8,7 +8,7 @@ To run on a vehicle PC whose ROS 2 stack uses CycloneDDS, including SSH setup fo
 
 ### Option A: Docker (recommended)
 
-Nothing to build. The launch file runs straight from this checkout, and the published image already contains the bridge, its Python packages, and CycloneDDS.
+Nothing to build to run it. The launch file runs straight from this checkout, and the published image already contains the bridge, its Python packages, and CycloneDDS.
 The host only needs Docker, ROS 2 (Humble or newer) to run `ros2 launch`, and an openpilot checkout:
 
 ```bash
@@ -21,6 +21,7 @@ ros2 launch /path/to/openpilot_ros2_bridge/launch/openpilot_bridge_docker.launch
 - If the openpilot checkout isn't built, add `prepare_openpilot:=true`. The launch then checks it out at the Comma's commit and builds the two parts the bridge uses, msgq and the cereal bridge, inside the container. This needs SSH access to the Comma; see [QUICKSTART.md](QUICKSTART.md).
 - If the image can't be pulled, for example offline in the car, the launch uses the copy pulled last time.
 - To use an image built from your local source instead, add `image_name:=openpilot_ros2_bridge:local image_source:=build`.
+- To use the typed messages in your own nodes on the host, build this package in your workspace for its message types; see [Typed messages](#typed-messages).
 
 ### Option B: Local install
 
@@ -28,8 +29,8 @@ Build openpilot natively ([instructions](https://github.com/commaai/openpilot/tr
 
 ```bash
 cd /path/to/ros2_ws
-colcon build --symlink-install --packages-select openpilot_ros2_bridge
 source /opt/ros/jazzy/setup.bash
+colcon build --symlink-install --packages-select openpilot_ros2_bridge
 source install/setup.bash
 export OPENPILOT_ROS2_BRIDGE_VENV=/path/to/openpilot_ros2_bridge/.venv
 ros2 launch openpilot_ros2_bridge openpilot_bridge.launch.py \
@@ -39,24 +40,64 @@ ros2 launch openpilot_ros2_bridge openpilot_bridge.launch.py \
 
 In both cases, the Comma device must also run its side of the bridge (`cd openpilot/cereal/messaging && ./bridge`). Alternatively, add `start_remote_bridge:=true remote_bridge_target:=comma@<comma_device_ip>` to start it over SSH. The sections below cover the details.
 
-Driver monitoring and drivetrain topics are published by default (see [Drivetrain](#drivetrain)). To also stream the cameras, add `start_camera:=true cameras:=road,wide_road,driver` (see [Cameras](#cameras)).
+Everything is published as typed ROS 2 messages that mirror openpilot's own (see [Typed messages](#typed-messages)); add `publish_arrays:=true` to also get the older `Float32MultiArray` topics. To also stream the cameras, add `start_camera:=true cameras:=road,wide_road,driver` (see [Cameras](#cameras)).
 
 ## What the bridge publishes
 
-The bridge now exposes:
-
-- `modelV2` predictions, lane lines, road edges, leads, temporal pose, disengage predictions, and desired curvature
-- `longitudinalPlan` as ROS 2 topics for speeds, accelerations, jerks, and planner state
-- `lateralPlan` as ROS 2 topics for path points, curvature, solver state, and lane-change state
-- `carState` and `carControl` summaries as ROS 2 topics
+- typed ROS 2 messages that mirror openpilot's own, one topic per openpilot service: `carState`, `carControl`, `carOutput`, `carParams`, `modelV2`, `longitudinalPlan`, `lateralPlan` (older openpilot), `driverStateV2`, `driverMonitoringState` and `extrinsicsCalibration` (see [Typed messages](#typed-messages))
+- drivetrain CAN messages (engine RPM, pedal positions, brake force, gear and more), decoded with opendbc and published as typed `CanMessage`s (see [Drivetrain](#drivetrain))
 - RViz marker topics for plan, lane lines, road edges, and leads
 - TF frames for openpilot's calibrated frame and the Comma device, driven by openpilot calibration
-- driver monitoring model output (`driverStateV2`) and policy state (`driverMonitoringState`)
-- drivetrain state from `carState`, `carOutput` and `carParams`, plus drivetrain CAN messages (engine RPM, pedal positions, brake force, gear and more) decoded with opendbc
 - optional road, wide road, and driver camera streams as raw and JPEG-compressed images
+- optional, with `publish_arrays:=true`: the older `Float32MultiArray` topics for the model, plans, car state and control, driver monitoring and drivetrain
 
-All topics are published under the `openpilot` namespace (for example `/openpilot/lane_lines`). Change it with `namespace:=<name>`.
-Fields that a given openpilot version no longer has are published as `NaN`, so array layouts stay the same across versions.
+All topics are published under the `openpilot` namespace (for example `/openpilot/carState`). Change it with `namespace:=<name>`.
+
+## Typed messages
+
+Each openpilot service the bridge reads is published as one ROS 2 message that mirrors openpilot's own struct, on a topic named after the service:
+
+| Topic | Type (`openpilot_ros2_bridge/msg/...`) | Rate |
+| --- | --- | --- |
+| `carState` | `CarState` | 100 Hz |
+| `carControl` | `CarControl` | 100 Hz |
+| `carOutput` | `CarOutput` | 100 Hz |
+| `carParams` | `CarParams` | every 50 s, latched |
+| `modelV2` | `ModelV2` | 20 Hz |
+| `longitudinalPlan` | `LongitudinalPlan` | 20 Hz |
+| `lateralPlan` | `LateralPlan` | 20 Hz, older openpilot only |
+| `driverStateV2` | `DriverStateV2` | 20 Hz |
+| `driverMonitoringState` | `DriverMonitoringState` | 20 Hz; needs openpilot 0.11.1 or newer |
+| `extrinsicsCalibration` | `ExtrinsicsCalibration` | 4 Hz; the topic is `liveCalibration` on older openpilot |
+| `can` | `CanMessage` | one per decoded drivetrain CAN frame |
+
+Each topic needs its openpilot service in `bridge_topics`; the default list has them all.
+
+How they map to openpilot:
+
+- Field names are openpilot's in snake_case, in openpilot's order: `carState.vEgo` is `v_ego` and `modelV2.leadsV3` is `leads_v3`. Nested structs are their own types, such as `CruiseState`, `XYZTData` and `LeadDataV3`.
+- Enums are `uint8` fields with named constants, for example `CarState.GEAR_SHIFTER_DRIVE`.
+- Every top-level message starts with `header` (stamped when received; `modelV2` uses the `openpilot` frame), `log_mono_time` (openpilot's timestamp, ns) and `valid`.
+- Deprecated fields, unions and raw data blobs are left out. A float field the running openpilot version doesn't have reads `NaN`, also inside a nested struct it doesn't have; other missing fields keep their default.
+- A struct the running openpilot has only in an older layout isn't published, and the log says so. That is `driverMonitoringState` before openpilot 0.11.1; `publish_arrays:=true` publishes that one as `driver_monitoring_legacy_state`.
+- `CanMessage` holds one decoded CAN frame: the DBC, bus, address and message name, and the signal names with their values.
+
+Show any definition with `ros2 interface show openpilot_ros2_bridge/msg/CarState`, or read it in [msg/](msg/).
+
+To use the messages in your own nodes, build this package in your workspace (`colcon build --packages-select openpilot_ros2_bridge`). That also holds for a host that only runs the Docker version.
+It builds on ROS 2 Humble too, and a Humble node receives the messages from the Jazzy container over CycloneDDS and over Fast DDS. On Fast DDS, Humble prints a harmless `sequence size exceeds remaining buffer` warning a few times.
+
+Your nodes and the bridge must be built with the same message definitions: with different ones, your nodes read wrong values, without any error.
+So rebuild the package after every `git pull`. The Docker launch pulls the `latest` image, which is built from `main`, so keep your checkout on `main`. For a release, set `image_name:=ghcr.io/jkk-research/openpilot_ros2_bridge:<tag>` to the release's `v*` tag; for any other checkout, build the image from it (`image_name:=openpilot_ros2_bridge:local image_source:=build`).
+The Docker launch warns when they differ. It checks the build your shell would use, or else the one in the colcon workspace that holds this checkout.
+
+The definitions are generated from openpilot's schema. After updating openpilot, regenerate them with a Python that has pycapnp, such as the bridge venv, and rebuild:
+
+```bash
+.venv/bin/python3 scripts/generate_msgs.py --openpilot /path/to/openpilot
+```
+
+The Docker version then needs an image built from your checkout as well (`image_name:=openpilot_ros2_bridge:local image_source:=build`), because the image holds its own build of the definitions.
 
 ## Prerequisites
 
@@ -74,6 +115,7 @@ Fields that a given openpilot version no longer has are published as `NaN`, so a
 
    ```bash
    cd /path/to/ros2_ws
+   source /opt/ros/jazzy/setup.bash
    colcon build --symlink-install --packages-select openpilot_ros2_bridge
    ```
 
@@ -108,6 +150,7 @@ Useful optional arguments:
 - `remote_bridge_target:=comma@<comma_device_ip>`
 - `bridge_topics:=modelV2,carControl,carState,longitudinalPlan,lateralPlan,liveCalibration,extrinsicsCalibration,driverStateV2,driverMonitoringState,carOutput,carParams,can`
 - `namespace:=openpilot`
+- `publish_arrays:=true`
 - `start_driver_monitoring:=false`
 - `start_drivetrain:=false`
 - `drivetrain_can_messages:=ENGINE_RPM,GEAR_PACKET`
@@ -134,23 +177,15 @@ ros2 launch openpilot_ros2_bridge openpilot_bridge.launch.py \
 
 ## Verifying the topics
 
-After launch, verify that the lane and plan topics are active:
+After launch, check that the typed topics are active:
 
 ```bash
 ros2 topic list | grep /openpilot/
+ros2 topic hz /openpilot/carState
+ros2 topic echo /openpilot/modelV2 --once
 ```
 
-Useful topics include:
-
-- `lane_lines`
-- `lane_line_probs`
-- `position`
-- `longitudinal_plan`
-- `longitudinal_plan_state`
-- `lateral_plan`
-- `lateral_plan_state`
-- `car_state_motion`
-- `car_control_actuators`
+`ros2 topic hz` and `ros2 topic echo` need the message types, so on a host that runs the Docker version, build the package first (see [Typed messages](#typed-messages)).
 
 For RViz visualization:
 
@@ -194,9 +229,9 @@ Notes:
 
 ## Driver monitoring
 
-The driver monitoring node is on by default (`start_driver_monitoring:=true`).
-It reads `driverStateV2` and `driverMonitoringState` through the local bridge, so keep both in `bridge_topics` if you override it.
-All topics are `std_msgs/Float32MultiArray`, in the same style as the other topics.
+Driver monitoring is on by default (`start_driver_monitoring:=true`): the typed `driverStateV2` and `driverMonitoringState` topics (see [Typed messages](#typed-messages)).
+They come through the local bridge, so keep both in `bridge_topics` if you override it.
+With `publish_arrays:=true`, the driver monitoring node also publishes them as these `std_msgs/Float32MultiArray` topics:
 
 Model output (`driverStateV2`). For the face topics, row 0 is the left-hand drive seat and row 1 is the right-hand drive seat:
 
@@ -221,12 +256,14 @@ Policy state (`driverMonitoringState`):
 ## Drivetrain
 
 The drivetrain node is on by default (`start_drivetrain:=true`).
-It reads `carState`, `carOutput`, `carParams` and the raw `can` stream through the local bridge, so keep all four in `bridge_topics` if you override it.
-If you turn the node off, you can drop `carOutput`, `carParams` and `can` from `bridge_topics`. Keep `carState`, because the `car_state_*` topics use it. The raw `can` stream is the largest of them: 100 batches per second, about 100 kB/s on a Lexus RX.
+It decodes the car's drivetrain CAN messages and publishes every frame as a typed `CanMessage` on `/openpilot/can` (see below).
+The car's state, what openpilot sent to it and the car's parameters are in the typed `carState`, `carOutput` and `carParams` topics.
+The node reads `carParams` and the raw `can` stream through the local bridge, so keep both in `bridge_topics` if you override it.
+If you turn the node off, you can drop `can` from `bridge_topics`: it is the largest stream, 100 batches per second and about 100 kB/s on a Lexus RX.
 
-### From openpilot's car interface
+### Array topics
 
-These work on every car. All are `std_msgs/Float32MultiArray` except `drivetrain_car`.
+With `publish_arrays:=true`, the node also publishes these. All are `std_msgs/Float32MultiArray`; `drivetrain_car` is a `std_msgs/String` that is always published.
 
 | Topic | Shape | Contents |
 | --- | --- | --- |
@@ -242,12 +279,12 @@ The CAN topics below carry the engine RPM on most combustion and hybrid cars; th
 
 The node decodes the car's drivetrain messages with opendbc, using the DBC that opendbc assigns to the car's fingerprint.
 It waits for the first `carParams` to know the car, which takes up to 50 s after start.
-Each message is published on `drivetrain_can/<message name in lower case>`, for example `/openpilot/drivetrain_can/engine_rpm`.
-The data holds the message's signals in DBC order and DBC units, and the layout label lists the signal names in the same order (`RPM,ENGINE_RUNNING`).
+Every decoded frame is published as a `CanMessage` on `/openpilot/can`: its DBC, bus, address and message name, with every data signal by name, in DBC order and DBC units.
+With `publish_arrays:=true`, each message is also published on `drivetrain_can/<message name in lower case>`, for example `/openpilot/drivetrain_can/engine_rpm`, with the signal names in the layout label (`RPM,ENGINE_RUNNING`).
 Frames with a bad checksum are dropped where opendbc checks the brand's checksum (Toyota, Honda, Hyundai CAN-FD, Volkswagen, Subaru global, Chrysler and Tesla among them), and counter errors drop frames only after several in a row.
 GM, Hyundai/Kia CAN, Mazda, Nissan and Subaru pre-global frames are not checked, and their checksum and counter signals are published as data.
 If the Comma reports a different car, the node switches to that car's DBC.
-This needs openpilot 0.10.0 or newer, whose opendbc has the pure-Python CAN parser; with older versions the node logs a warning and publishes only the topics above.
+This needs openpilot 0.10.0 or newer, whose opendbc has the pure-Python CAN parser; with older versions the node logs a warning and decodes nothing.
 On openpilot 0.11.0 and older, opendbc's `*_generated` DBC files only exist after a full openpilot build.
 
 Default messages per opendbc brand. A brand's list covers all its DBC variants, and the node keeps the ones the car's DBC defines:
@@ -271,7 +308,8 @@ Default messages per opendbc brand. A brand's list covers all its DBC variants, 
 | Volkswagen group | `Motor_14`, `Motor_20`, `ESP_05`, `Getriebe_11`, `Motor_51`, `ESC_50`, `Motor_EV_01`, `Motor_3`, `Motor_03`, `Getriebe_1` |
 
 Toyota and Lexus defaults are checked against logs from a Lexus RX hybrid.
-There, `ENGINE_RPM` arrives at 42 Hz, `GEAR_PACKET_HYBRID` at 61 Hz with `FDRVREAL` as the driving force at the wheels in N (negative under regen), and `BRAKE` at 80 Hz with `BRAKE_FORCE` as the friction brake force in N.
+There, `ENGINE_RPM` arrives at 42 Hz, `GEAR_PACKET_HYBRID` at 61 Hz with `FDRVREAL` as the driving force at the wheels in N (negative under coasting regen), and `BRAKE` at 80 Hz with `BRAKE_FORCE` as the braking force in N.
+The DBC calls `BRAKE_FORCE` friction only, but on that car it carries all pedal braking, regen included, so `FDRVREAL` minus `BRAKE_FORCE` is the total force at the wheels while moving; at standstill `BRAKE_FORCE` shows the brake hold instead.
 `ENGINE_RUNNING` stays 0 on that car, so use `RPM`.
 Non-hybrids send `GAS_PEDAL` instead of `GAS_PEDAL_HYBRID` (accelerator 0-1). On most models it carries the accelerator in % and the engine torque in Nm; on the SecOC models (RAV4 Prime, Sienna, Yaris) it is a different message with `GAS_PEDAL_USER`.
 `GEAR_PACKET` `GEAR` is 0 D, 1 S, 8 N, 16 R, 32 P; `GEAR_PACKET_HYBRID` `GEAR` is 0 P, 1 R, 2 N, 3 D, 4 B.

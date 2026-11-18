@@ -3,15 +3,16 @@
 import sys
 
 import rclpy
-import numpy as np
 import math
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import QoSProfile
 from std_msgs.msg import Header
 from std_msgs.msg import ColorRGBA
-from std_msgs.msg import Float32MultiArray
 from geometry_msgs.msg import Point, Quaternion
 from visualization_msgs.msg import MarkerArray, Marker
+
+from openpilot_ros2_bridge.msg import ModelV2
 
 class OpenPilotPredictionVisualizer(Node):
 
@@ -30,25 +31,21 @@ class OpenPilotPredictionVisualizer(Node):
         self.openpilot_leads_pub = self.create_publisher(MarkerArray, 'leads_markers', qos_profile)
 
         # Subscribers
-        self.create_subscription(Float32MultiArray, 'position', self.position_callback, qos_profile)
-        self.create_subscription(Float32MultiArray, 'lane_lines', self.lane_lines_callback, qos_profile)
-        self.create_subscription(Float32MultiArray, 'lane_line_probs', self.lane_lines_probs_callback, qos_profile)
-        self.create_subscription(Float32MultiArray, 'road_edges', self.road_edges_callback, qos_profile)
-        self.create_subscription(Float32MultiArray, 'leads_v3', self.leads_v3_callback, qos_profile)
-
-        self.latest_lane_line_probs = np.zeros(4, dtype=np.float32)
+        self.create_subscription(ModelV2, 'modelV2', self.model_callback, qos_profile)
 
     def marker_header(self):
         return Header(stamp=self.get_clock().now().to_msg(), frame_id=self.openpilot_frame)
 
-    def position_callback(self, msg):
-        position = float32_multiarray_to_numpy(msg)
-        if position.ndim != 2 or position.shape[0] < 3:
-            return
+    def model_callback(self, msg):
+        self.publish_plan(msg.position)
+        self.publish_lane_lines(msg.lane_lines, msg.lane_line_probs)
+        self.publish_road_edges(msg.road_edges)
+        self.publish_leads(msg.leads_v3)
 
-        plan_points = []
-        for x, y, z, _ in position.T:
-            plan_points.append(openpilot_point(x, y, z))
+    def publish_plan(self, position):
+        plan_points = [openpilot_point(x, y, z) for x, y, z in zip(position.x, position.y, position.z)]
+        if not plan_points:
+            return
 
         plan_marker_array = MarkerArray()
 
@@ -87,32 +84,18 @@ class OpenPilotPredictionVisualizer(Node):
 
         self.openpilot_plan_pub.publish(plan_marker_array)
 
-    def lane_lines_probs_callback(self, msg):
-        lane_lines_probs = float32_multiarray_to_numpy(msg).flatten()
-        if lane_lines_probs.size == 0:
+    def publish_lane_lines(self, lane_lines, lane_lines_probs):
+        if not lane_lines:
             return
-        self.latest_lane_line_probs = lane_lines_probs
-
-    def road_edges_std_callback(self, msg):
-        return
-
-    
-
-    def lane_lines_callback(self, lane_lines_msg):
-        lane_lines = float32_multiarray_to_numpy(lane_lines_msg)
-        if lane_lines.ndim != 3 or lane_lines.shape[1] < 3:
-            return
-        lane_lines_probs = self.latest_lane_line_probs
 
         lanes_marker_array = MarkerArray()
 
-        lane_count = min(4, lane_lines.shape[0])
+        lane_count = min(4, len(lane_lines))
         for i in range(lane_count):
-            lane_points = []
-            for x, y, z, _ in lane_lines[i].T:
-                lane_points.append(openpilot_point(x, y, z))
+            lane = lane_lines[i]
+            lane_points = [openpilot_point(x, y, z) for x, y, z in zip(lane.x, lane.y, lane.z)]
             # only visualize lane if its probability >= 30%
-            prob = float(lane_lines_probs[i]) if i < lane_lines_probs.size else 0.0
+            prob = float(lane_lines_probs[i]) if i < len(lane_lines_probs) else 0.0
             if prob < 0.3:
                 continue
 
@@ -130,17 +113,15 @@ class OpenPilotPredictionVisualizer(Node):
         
         self.openpilot_lanes_pub.publish(lanes_marker_array)
 
-    def road_edges_callback(self, road_edges_msg):
-        road_edges = float32_multiarray_to_numpy(road_edges_msg)
-        if road_edges.ndim != 3 or road_edges.shape[1] < 3:
+    def publish_road_edges(self, road_edges):
+        if not road_edges:
             return
 
         edges_marker_array = MarkerArray()
-        edge_count = min(2, road_edges.shape[0])
+        edge_count = min(2, len(road_edges))
         for i in range(edge_count):
-            edge_points = []
-            for x, y, z, _ in road_edges[i].T:
-                edge_points.append(openpilot_point(x, y, z))
+            edge = road_edges[i]
+            edge_points = [openpilot_point(x, y, z) for x, y, z in zip(edge.x, edge.y, edge.z)]
 
             # Always visualize road edges regardless of std/probability
             alpha = 1.0
@@ -181,9 +162,8 @@ class OpenPilotPredictionVisualizer(Node):
 
         self.openpilot_edges_pub.publish(edges_marker_array)
 
-    def leads_v3_callback(self, msg):
-        leads = float32_multiarray_to_numpy(msg)
-        if leads.ndim != 3 or leads.shape[1] < 9 or leads.shape[2] == 0:
+    def publish_leads(self, leads):
+        if not leads:
             return
 
         leads_marker_array = MarkerArray()
@@ -193,16 +173,9 @@ class OpenPilotPredictionVisualizer(Node):
                   ColorRGBA(r=0.0, g=0.0, b=1.0, a=1.0), ColorRGBA(r=1.0, g=1.0, b=0.0, a=1.0),
                   ColorRGBA(r=1.0, g=0.0, b=1.0, a=1.0), ColorRGBA(r=0.0, g=1.0, b=1.0, a=1.0)]
 
-        lead_count = leads.shape[0]
-        for i in range(lead_count):
-            lead = leads[i]
-            xs = lead[0]
-            ys = lead[2]
-            vs = lead[4] if lead.shape[0] > 4 else []
-
-            points = []
-            for x, y in zip(xs, ys):
-                points.append(openpilot_point(x, y, 0.0))
+        for i, lead in enumerate(leads):
+            vs = lead.v
+            points = [openpilot_point(x, y, 0.0) for x, y in zip(lead.x, lead.y)]
 
             color = colors[i % len(colors)]
 
@@ -324,20 +297,20 @@ class OpenPilotPredictionVisualizer(Node):
 
 
 def openpilot_point(x, y, z):
-    # The publisher negates x in its arrays; undo it to get a point in openpilot's calibrated frame
-    return Point(x=-float(x), y=float(y), z=float(z))
-
-def float32_multiarray_to_numpy(multiarray):
-    dims = tuple(map(lambda x: x.size, multiarray.layout.dim))
-    data = multiarray.data[multiarray.layout.data_offset:]
-    return np.array(data, dtype=np.float32).reshape(dims)
+    # ModelV2 carries openpilot's own values, already in its calibrated frame
+    return Point(x=float(x), y=float(y), z=float(z))
 
 def main(args=None):
     rclpy.init(args=args)
     node = OpenPilotPredictionVisualizer()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+
+    try:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

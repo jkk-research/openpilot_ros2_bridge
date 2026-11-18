@@ -2,22 +2,27 @@
 <package format="3">
   <name>openpilot_ros2_bridge</name>
   <version>0.1.0</version>
-  <description>ROS 2 launch and bridge utilities for openpilot messaging.</description>
+  <description>ROS 2 bridge for openpilot: typed mirrors of openpilot's messages, launch files and bridge nodes.</description>
   <maintainer email="opensource@jkk-research.org">jkk-research</maintainer>
   <license>TODO: License declaration</license>
 
-  <buildtool_depend>ament_python</buildtool_depend>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
 
+  <depend>std_msgs</depend>
+
+  <exec_depend>rosidl_default_runtime</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
-  <exec_depend>std_msgs</exec_depend>
   <exec_depend>visualization_msgs</exec_depend>
 
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
   <export>
-    <build_type>ament_python</build_type>
+    <build_type>ament_cmake</build_type>
   </export>
 </package>

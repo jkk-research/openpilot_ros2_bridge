@@ -9,7 +9,7 @@ from launch.substitutions import EnvironmentVariable, LaunchConfiguration
 _FORWARDED_ARGS = [
     'start_bridge', 'comma_ip', 'bridge_topics',
     'modelv2_port', 'longitudinal_plan_port', 'lateral_plan_port', 'car_state_port', 'car_control_port',
-    'start_driver_monitoring', 'driver_state_port', 'driver_monitoring_state_port',
+    'publish_arrays', 'start_driver_monitoring', 'driver_state_port', 'driver_monitoring_state_port',
     'start_drivetrain', 'car_output_port', 'car_params_port', 'can_port',
     'drivetrain_can_dbc', 'drivetrain_can_bus', 'drivetrain_can_messages',
     'start_camera', 'cameras', 'camera_ip', 'camera_scale', 'camera_jpeg_quality',
@@ -108,6 +108,7 @@ def generate_launch_description():
         DeclareLaunchArgument('lateral_plan_port', default_value='lateralPlan'),
         DeclareLaunchArgument('car_state_port', default_value='carState'),
         DeclareLaunchArgument('car_control_port', default_value='carControl'),
+        DeclareLaunchArgument('publish_arrays', default_value='false'),
         DeclareLaunchArgument('start_driver_monitoring', default_value='true'),
         DeclareLaunchArgument('driver_state_port', default_value='driverStateV2'),
         DeclareLaunchArgument('driver_monitoring_state_port', default_value='driverMonitoringState'),

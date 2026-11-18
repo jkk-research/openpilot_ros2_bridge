@@ -1,7 +1,7 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction, TimerAction
 from launch.conditions import IfCondition
-from launch.substitutions import EnvironmentVariable, LaunchConfiguration
+from launch.substitutions import EnvironmentVariable, LaunchConfiguration, PythonExpression
 from ament_index_python.packages import get_package_share_directory
 
 
@@ -29,7 +29,8 @@ def _script_command(script_name, ros_arguments):
             '/opendbc_repo:',
             LaunchConfiguration('openpilot_root'),
             '/msgq_repo:${PYTHONPATH:-}" && ',
-            'python3 "',
+            # exec, so launch's SIGINT/SIGTERM reach the node instead of orphaning it under bash
+            'exec python3 "',
             script_path,
             '" --ros-args -r __ns:=/',
             LaunchConfiguration('namespace'),
@@ -62,6 +63,14 @@ def _camera_publishers(context):
     ]
 
 
+def _both(first, second):
+    # True when both launch arguments are set to true (true/1, any case)
+    return IfCondition(PythonExpression([
+        "'", LaunchConfiguration(first), "'.lower() in ('true', '1') and '",
+        LaunchConfiguration(second), "'.lower() in ('true', '1')",
+    ]))
+
+
 def generate_launch_description():
     bridge_topics = LaunchConfiguration('bridge_topics')
 
@@ -75,7 +84,7 @@ def generate_launch_description():
                 LaunchConfiguration('openpilot_root'),
                 '" && ',
                 'if [ -d "$OPENPILOT_ROOT/cereal/messaging" ]; then OPENPILOT_CEREAL_DIR="$OPENPILOT_ROOT/cereal/messaging"; elif [ -d "$OPENPILOT_ROOT/openpilot/cereal/messaging" ]; then OPENPILOT_CEREAL_DIR="$OPENPILOT_ROOT/openpilot/cereal/messaging"; else echo "Could not find openpilot cereal/messaging under $OPENPILOT_ROOT" >&2; exit 1; fi && ',
-                'cd "$OPENPILOT_CEREAL_DIR" && ./bridge "',
+                'cd "$OPENPILOT_CEREAL_DIR" && exec ./bridge "',
                 LaunchConfiguration('comma_ip'),
                 '" "',
                 bridge_topics,
@@ -101,7 +110,29 @@ def generate_launch_description():
         output='screen',
     )
 
+    typed_publisher = ExecuteProcess(
+        cmd=_script_command(
+            'openpilot_typed_publisher.py',
+            [
+                '-p modelv2_port:=', LaunchConfiguration('modelv2_port'),
+                ' -p longitudinal_plan_port:=', LaunchConfiguration('longitudinal_plan_port'),
+                ' -p lateral_plan_port:=', LaunchConfiguration('lateral_plan_port'),
+                ' -p car_state_port:=', LaunchConfiguration('car_state_port'),
+                ' -p car_control_port:=', LaunchConfiguration('car_control_port'),
+                ' -p car_output_port:=', LaunchConfiguration('car_output_port'),
+                ' -p car_params_port:=', LaunchConfiguration('car_params_port'),
+                ' -p driver_state_port:=', LaunchConfiguration('driver_state_port'),
+                ' -p driver_monitoring_state_port:=', LaunchConfiguration('driver_monitoring_state_port'),
+                ' -p driver_monitoring:=', LaunchConfiguration('start_driver_monitoring'),
+                ' -p openpilot_frame:=', LaunchConfiguration('openpilot_frame'),
+            ],
+        ),
+        output='screen',
+    )
+
+    # The Float32MultiArray topics, only with publish_arrays:=true
     prediction_publisher = ExecuteProcess(
+        condition=IfCondition(LaunchConfiguration('publish_arrays')),
         cmd=_script_command(
             'openpilot_prediction_publisher.py',
             [
@@ -142,7 +173,7 @@ def generate_launch_description():
     )
 
     driver_monitoring_publisher = ExecuteProcess(
-        condition=IfCondition(LaunchConfiguration('start_driver_monitoring')),
+        condition=_both('publish_arrays', 'start_driver_monitoring'),
         cmd=_script_command(
             'openpilot_driver_monitoring_publisher.py',
             [
@@ -165,6 +196,7 @@ def generate_launch_description():
                 ' -p can_dbc:=', LaunchConfiguration('drivetrain_can_dbc'),
                 ' -p can_bus:=', LaunchConfiguration('drivetrain_can_bus'),
                 ' -p can_messages:=', LaunchConfiguration('drivetrain_can_messages'),
+                ' -p publish_arrays:=', LaunchConfiguration('publish_arrays'),
             ],
         ),
         output='screen',
@@ -207,6 +239,7 @@ def generate_launch_description():
         DeclareLaunchArgument('lateral_plan_port', default_value='lateralPlan'),
         DeclareLaunchArgument('car_state_port', default_value='carState'),
         DeclareLaunchArgument('car_control_port', default_value='carControl'),
+        DeclareLaunchArgument('publish_arrays', default_value='false'),
         DeclareLaunchArgument('start_driver_monitoring', default_value='true'),
         DeclareLaunchArgument('driver_state_port', default_value='driverStateV2'),
         DeclareLaunchArgument('driver_monitoring_state_port', default_value='driverMonitoringState'),
@@ -227,6 +260,7 @@ def generate_launch_description():
         TimerAction(
             period=2.0,
             actions=[
+                typed_publisher,
                 prediction_publisher,
                 prediction_visualizer,
                 tf_publisher,

@@ -65,6 +65,61 @@ case "${IMAGE_SOURCE}" in
     ;;
 esac
 
+# The typed message definitions are compiled into the image. ROS nodes on the host decode its topics correctly only
+# with the same definitions; different ones give wrong values without any error. Each build lists the definitions it
+# built in its ament index (rewritten by every build, unlike install/, which keeps files of removed messages), and
+# the generated .idl files show what was built (with --symlink-install the installed .msg files link to the sources).
+IMAGE_MSG_DIGESTS="$(docker run --rm --network none --entrypoint sh "${IMAGE_NAME}" -c \
+  'cd /workspace/ros2_ws/install/openpilot_ros2_bridge/share/openpilot_ros2_bridge 2>/dev/null &&
+   grep -E "\.(msg|idl)\$" ../ament_index/resource_index/rosidl_interfaces/openpilot_ros2_bridge | xargs -r sha256sum --' \
+  2>/dev/null | LC_ALL=C sort -k2 || true)"
+image_digests_of() {
+  grep "\.$1\$" <<<"${IMAGE_MSG_DIGESTS}" || true
+}
+interface_digests_of() {
+  # $1: install prefix that holds the package; the .idl files its last build registered
+  (cd "$1/share/openpilot_ros2_bridge" 2>/dev/null &&
+    grep '\.idl$' ../ament_index/resource_index/rosidl_interfaces/openpilot_ros2_bridge 2>/dev/null |
+    xargs -r sha256sum -- 2>/dev/null | LC_ALL=C sort -k2) || true
+}
+host_package_prefix() {
+  # The build host nodes use: the first on AMENT_PREFIX_PATH, like ament's own lookup, else the colcon workspace
+  # this checkout sits in (<ws>/src/openpilot_ros2_bridge), with an isolated or a merged install
+  local prefix ws
+  local -a prefixes=()
+  IFS=: read -r -a prefixes <<<"${AMENT_PREFIX_PATH:-}"
+  ws="$(dirname "$(dirname "${REPO_ROOT}")")"
+  for prefix in "${prefixes[@]}" "${ws}/install/openpilot_ros2_bridge" "${ws}/install"; do
+    if [[ -n "${prefix}" && -e "${prefix}/share/ament_index/resource_index/packages/openpilot_ros2_bridge" ]]; then
+      echo "${prefix}"
+      return
+    fi
+  done
+}
+
+# mount_source swaps in this checkout's scripts and launch files, which need this checkout's definitions; check it
+# before anything slow runs
+if [[ "${MOUNT_SOURCE}" == "true" ]]; then
+  if [[ ! -d "${REPO_ROOT}/openpilot" ]]; then
+    echo "mount_source needs the bridge source tree; ${REPO_ROOT}/openpilot not found (set repo_root)" >&2
+    exit 1
+  fi
+  if [[ "$(cd "${REPO_ROOT}" && sha256sum -- msg/*.msg 2>/dev/null | LC_ALL=C sort -k2)" != "$(image_digests_of msg)" ]]; then
+    echo "mount_source:=true can't be used with ${IMAGE_NAME}: it was built with different message definitions than" \
+      "${REPO_ROOT}/msg, and mount_source only swaps in scripts and launch files." \
+      "Build the image from this checkout instead: image_name:=openpilot_ros2_bridge:local image_source:=build" >&2
+    exit 1
+  fi
+fi
+
+HOST_PACKAGE_PREFIX="$(host_package_prefix)"
+if [[ -n "${HOST_PACKAGE_PREFIX}" && "$(interface_digests_of "${HOST_PACKAGE_PREFIX}")" != "$(image_digests_of idl)" ]]; then
+  echo "Warning: the openpilot_ros2_bridge package built in ${HOST_PACKAGE_PREFIX} has different message definitions" \
+    "than ${IMAGE_NAME}, so ROS nodes using it will read wrong values from the typed topics." \
+    "Rebuild the package from the same commit as the image, or build the image from your checkout" \
+    "(image_name:=openpilot_ros2_bridge:local image_source:=build)." >&2
+fi
+
 # Check out the Comma's openpilot commit and build msgq + cereal bridge, each only when needed
 prepare_openpilot() {
   local info="" url commit current head
@@ -159,12 +214,8 @@ if [[ -n "${CYCLONEDDS_URI_VALUE}" ]]; then
   DOCKER_ARGS+=(-e CYCLONEDDS_URI="${CYCLONEDDS_URI_VALUE}")
 fi
 
-# Run this checkout's scripts and launch files instead of the ones baked into the image
+# Run this checkout's scripts and launch files instead of the ones baked into the image (checked above)
 if [[ "${MOUNT_SOURCE}" == "true" ]]; then
-  if [[ ! -d "${REPO_ROOT}/openpilot" ]]; then
-    echo "mount_source needs the bridge source tree; ${REPO_ROOT}/openpilot not found (set repo_root)" >&2
-    exit 1
-  fi
   CONTAINER_SHARE=/workspace/ros2_ws/install/openpilot_ros2_bridge/share/openpilot_ros2_bridge
   DOCKER_ARGS+=(
     -v "${REPO_ROOT}/openpilot:${CONTAINER_SHARE}/scripts:ro"

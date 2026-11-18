@@ -35,6 +35,9 @@ jobs:
         uses: docker/metadata-action@v6.2.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # latest only from main (the raw rule below); without this, every v* tag build would move latest too
+          flavor: |
+            latest=false
           tags: |
             type=ref,event=branch
             type=ref,event=tag

@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 
+import math
 import sys
+import threading
+import time
+
 import rclpy
 import numpy as np
-import threading
 import cereal.messaging as messaging
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from std_msgs.msg import MultiArrayDimension
 from std_msgs.msg import Float32MultiArray
 from std_msgs.msg import String
+
+from openpilot_ros2_bridge.msg import CanMessage
 
 # Default drivetrain messages decoded from the raw CAN bus, per opendbc brand. A brand's list spans all its DBC
 # variants. role: the platform's dbc_dict entry that holds them; bus: the CAN bus they arrive on with a single panda,
@@ -130,15 +136,20 @@ class OpenPilotDrivetrainPublisher(Node):
         self.declare_parameter("can_dbc", "auto")
         self.declare_parameter("can_bus", -1)
         self.declare_parameter("can_messages", "default")
+        self.declare_parameter("publish_arrays", False, ParameterDescriptor(dynamic_typing=True))
+        self.publish_arrays = str(self.get_parameter("publish_arrays").value).lower() in ('true', '1')
 
         # Publishers; carParams only arrives every 50 s, so late subscribers get the last one
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
-        self.state_pub = self.create_publisher(Float32MultiArray, 'drivetrain_state', 1)
-        self.command_pub = self.create_publisher(Float32MultiArray, 'drivetrain_command', 1)
-        self.params_pub = self.create_publisher(Float32MultiArray, 'drivetrain_params', latched)
         self.car_pub = self.create_publisher(String, 'drivetrain_car', latched)
+        # Every decoded frame; a 10 ms batch can hold several
+        self.can_pub = self.create_publisher(CanMessage, 'can', 50)
+        if self.publish_arrays:
+            self.state_pub = self.create_publisher(Float32MultiArray, 'drivetrain_state', 1)
+            self.command_pub = self.create_publisher(Float32MultiArray, 'drivetrain_command', 1)
+            self.params_pub = self.create_publisher(Float32MultiArray, 'drivetrain_params', latched)
 
-        # (CANParser, {address: (publisher, signal names, layout label)}), set once the DBC is known
+        # (CANParser, dbc, bus, {address: (array publisher or None, message name, signal names, layout label)})
         self.can_decoder = None
         self.can_description = "can=off"
         self.can_publishers = {}
@@ -149,11 +160,14 @@ class OpenPilotDrivetrainPublisher(Node):
             self.setup_can_decoding(None, "fixed")
 
         subscriptions = [
-            (self.get_parameter("car_state_port").value, self.process_car_state),
-            (self.get_parameter("car_output_port").value, self.process_car_output),
             (self.get_parameter("car_params_port").value, self.process_car_params),
             (self.get_parameter("can_port").value, self.process_can),
         ]
+        if self.publish_arrays:
+            subscriptions += [
+                (self.get_parameter("car_state_port").value, self.process_car_state),
+                (self.get_parameter("car_output_port").value, self.process_car_output),
+            ]
 
         self.cereal_threads = []
         for topic_name, handler in subscriptions:
@@ -201,12 +215,17 @@ class OpenPilotDrivetrainPublisher(Node):
         return default
 
     def cereal_loop(self, sock, topic_name, handler):
+        last_error = -math.inf
         while rclpy.ok():
-            message = messaging.recv_one(sock)
-            if message:
-                try:
+            # Everything inside the try, so a frame that doesn't decode drops only itself
+            try:
+                message = messaging.recv_one(sock)
+                if message:
                     handler(message)
-                except Exception as exc:
+            except Exception as exc:
+                # At most one line per topic every 5 s, so a stream of bad frames doesn't flood the log
+                if time.monotonic() - last_error > 5.0:
+                    last_error = time.monotonic()
                     self.get_logger().error(f"Failed to process {topic_name}: {exc}")
 
     def process_car_state(self, message):
@@ -253,6 +272,14 @@ class OpenPilotDrivetrainPublisher(Node):
         brand = str(self.field(car_params, 'brand', 'carName', default=''))
         fingerprint = str(car_params.carFingerprint)
 
+        if self.publish_arrays:
+            self.publish_car_params_array(car_params)
+        if self.get_parameter("can_dbc").value == "auto":
+            # Rebuilt when the Comma reports another car
+            self.setup_can_decoding(car_params, (brand, fingerprint, int(self.field(car_params, 'flags', default=0))))
+        self.car_pub.publish(String(data=f"brand={brand} fingerprint={fingerprint} {self.can_description}"))
+
+    def publish_car_params_array(self, car_params):
         self.publish_array(
             [
                 self.to_float(car_params.transmissionType),
@@ -269,11 +296,6 @@ class OpenPilotDrivetrainPublisher(Node):
             ],
             self.params_pub,
         )
-
-        if self.get_parameter("can_dbc").value == "auto":
-            # Rebuilt when the Comma reports another car
-            self.setup_can_decoding(car_params, (brand, fingerprint, int(self.field(car_params, 'flags', default=0))))
-        self.car_pub.publish(String(data=f"brand={brand} fingerprint={fingerprint} {self.can_description}"))
 
     def setup_can_decoding(self, car_params, key):
         with self.can_setup_lock:
@@ -360,16 +382,19 @@ class OpenPilotDrivetrainPublisher(Node):
             msg = dbc.name_to_msg[name]
             # Checksums and counters only matter to the parser's validity checks
             signals = [sig.name for sig in msg.sigs.values() if sig.type == SignalType.DEFAULT]
-            topic = f"drivetrain_can/{name.lower()}"
-            try:
-                if topic not in self.can_publishers:
-                    # Depth 10: two frames of a message can arrive in one 10 ms batch
-                    self.can_publishers[topic] = self.create_publisher(Float32MultiArray, topic, 10)
-            except Exception as exc:
-                self.get_logger().warning(f"Skipping {name}, not usable as a topic name: {exc}")
-                names.remove(name)
-                continue
-            topics[msg.address] = (self.can_publishers[topic], signals, ",".join(signals))
+            publisher = None
+            if self.publish_arrays:
+                topic = f"drivetrain_can/{name.lower()}"
+                try:
+                    if topic not in self.can_publishers:
+                        # Depth 10: two frames of a message can arrive in one 10 ms batch
+                        self.can_publishers[topic] = self.create_publisher(Float32MultiArray, topic, 10)
+                except Exception as exc:
+                    self.get_logger().warning(f"Skipping {name}, not usable as a topic name: {exc}")
+                    names.remove(name)
+                    continue
+                publisher = self.can_publishers[topic]
+            topics[msg.address] = (publisher, name, signals, ",".join(signals))
         if not names:
             return None, f"can=off (no drivetrain messages in DBC {dbc_name})"
 
@@ -377,25 +402,33 @@ class OpenPilotDrivetrainPublisher(Node):
         parser = CANParser(dbc_name, [(name, float("nan")) for name in names], bus)
         description = f"dbc={dbc_name} bus={bus} messages={','.join(names)}"
         self.get_logger().info(f"Decoding drivetrain CAN messages: {description}")
-        return (parser, topics), description
+        return (parser, dbc_name, bus, topics), description
 
     def process_can(self, message):
         decoder = self.can_decoder
         if decoder is None:
             return
-        parser, topics = decoder
+        parser, dbc_name, bus, topics = decoder
 
         frames = [(frame.address, frame.dat, frame.src) for frame in message.can]
+        stamp = self.get_clock().now().to_msg()
         for address in parser.update([(message.logMonoTime, frames)]):
-            publisher, signals, label = topics[address]
+            publisher, name, signals, label = topics[address]
             # Every valid frame of this batch, not only the last one
             samples = parser.vl_all[address]
             for i in range(len(next(iter(samples.values()), ()))):
-                multiarray = Float32MultiArray()
-                # The label names the signals in data order
-                multiarray.layout.dim = [MultiArrayDimension(label=label, size=len(signals), stride=1)]
-                multiarray.data = [float(samples[name][i]) for name in signals]
-                publisher.publish(multiarray)
+                values = [float(samples[signal][i]) for signal in signals]
+                can_msg = CanMessage(dbc=dbc_name, bus=bus, address=address, name=name, signal_names=signals, values=values)
+                can_msg.header.stamp = stamp
+                can_msg.log_mono_time = message.logMonoTime
+                can_msg.valid = message.valid
+                self.can_pub.publish(can_msg)
+                if publisher is not None:
+                    multiarray = Float32MultiArray()
+                    # The label names the signals in data order
+                    multiarray.layout.dim = [MultiArrayDimension(label=label, size=len(signals), stride=1)]
+                    multiarray.data = values
+                    publisher.publish(multiarray)
 
 def main(args=None):
     rclpy.init(args=args)

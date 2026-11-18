@@ -38,7 +38,19 @@ ros2 launch ~/ros2_ws/src/openpilot_ros2_bridge/launch/openpilot_bridge_docker.l
   base_frame:=lexus3/base_link device_x:=1.6 device_y:=0 base_frame_height:=0.37
 ```
 
-If you have built the package in a workspace, `ros2 launch openpilot_ros2_bridge openpilot_bridge_docker.launch.py ...` with the same arguments works too.
+The topics are typed messages that mirror openpilot's own (`openpilot_ros2_bridge/msg/CarState` and so on; see [Typed messages](README.md#typed-messages)).
+Your nodes, and `ros2 topic echo` or `hz`, need these message types, so build the package in your workspace. It builds on Humble:
+
+```bash
+cd ~/ros2_ws
+source /opt/ros/humble/setup.bash
+colcon build --packages-select openpilot_ros2_bridge
+source install/setup.bash
+```
+
+Rebuild it after every `git pull` of this repository. The launch pulls the newest image, which follows `main`, and with different message definitions on the two sides your nodes read wrong values without any error. The launch compares your build in `~/ros2_ws` (or the one your shell has sourced) with the image and prints a warning when they differ.
+
+After that, `ros2 launch openpilot_ros2_bridge openpilot_bridge_docker.launch.py ...` with the same arguments works too.
 
 The launch file does the following, and does each step only when it's needed:
 
@@ -56,7 +68,7 @@ Set these for your car:
 - `base_frame` and `base_frame_height`: your base frame, and its height above the road in meters.
 - `device_x` and `device_y`: the Comma's measured mount position in `base_frame`. The height comes from openpilot calibration.
 
-It's ready when the log shows `OpenPilot prediction publisher is ready.` and `Calibration calibrated: ...`.
+It's ready when the log shows `OpenPilot typed publisher is ready.` and `Calibration calibrated: ...`.
 
 To stop it, press Ctrl+C. That stops the container and the bridge on the Comma.
 
@@ -71,8 +83,9 @@ Other useful arguments:
 | `start_tf:=false` | Turns off the TF frames. |
 | `start_camera:=true cameras:=road,wide_road,driver` | Streams the cameras to `/openpilot/<camera>_camera/image_raw` and `.../compressed`. |
 | `start_driver_monitoring:=false` | Turns off the driver monitoring topics. |
-| `start_drivetrain:=false` | Turns off the drivetrain topics, including the decoded CAN messages. |
-| `mount_source:=true` | Runs this repository's scripts and launch files instead of the copies in the image, for testing local changes. |
+| `start_drivetrain:=false` | Turns off the decoded CAN messages on `/openpilot/can`. |
+| `publish_arrays:=true` | Also publishes the older `Float32MultiArray` topics (`car_state_*`, `driver_*`, `drivetrain_*` and more). |
+| `mount_source:=true` | Runs this repository's scripts and launch files instead of the copies in the image, for testing local changes. Changes to the message definitions (`msg/`) need `image_name:=openpilot_ros2_bridge:local image_source:=build` instead. |
 
 ## 3. Check it
 
@@ -80,21 +93,23 @@ Run this in a host shell with the same ROS settings:
 
 ```bash
 ros2 topic list | grep /openpilot/
-ros2 topic hz /openpilot/car_state_motion
+ros2 topic hz /openpilot/carState
 ros2 run tf2_ros tf2_echo lexus3/base_link openpilot_device
 ```
+
+`ros2 topic hz /openpilot/carState` needs the package built (see above); `ros2 topic hz /openpilot/plan_markers` works without it.
 
 Expected rates:
 
 | Topics | Rate |
 |---|---|
-| modelV2-based topics and markers | ~20 Hz |
-| `car_state_*`, `car_control_*` | ~100 Hz |
-| `driver_*` | ~20 Hz |
-| `drivetrain_state`, `drivetrain_command` | ~100 Hz |
-| `drivetrain_can/*` | each message's CAN rate, starting after the first `carParams` (up to 50 s) |
+| `carState`, `carControl`, `carOutput` | ~100 Hz |
+| `modelV2`, `longitudinalPlan`, `driverStateV2`, `driverMonitoringState` and the markers | ~20 Hz; `driverMonitoringState` needs openpilot 0.11.1 or newer |
+| `extrinsicsCalibration` (`liveCalibration` on older openpilot) | ~4 Hz |
+| `carParams` | every 50 s, latched |
+| `can` | every decoded drivetrain frame, about 280 per second on a Lexus RX, starting after the first `carParams` (up to 50 s) |
 | `*_camera/image_raw*` (with `start_camera:=true`) | ~20 Hz while onroad |
-| `temporal_pose_*`, `lateral_plan_*` | silent on openpilot versions that no longer publish them |
+| `lateralPlan` | only on older openpilot versions that still publish it |
 
 The topics show up in `ros2 topic list`, but the driver's nodes won't appear in `ros2 node list` from a Humble host. That's expected: the container runs Jazzy, and Humble can't decode its node info.
 
