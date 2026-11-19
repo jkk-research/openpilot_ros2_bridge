@@ -202,6 +202,32 @@ def generate_launch_description():
         output='screen',
     )
 
+    # Drive commands from ROS 2 to openpilot's joystick mode, only with start_control:=true
+    joystick_sender = ExecuteProcess(
+        condition=IfCondition(LaunchConfiguration('start_control')),
+        cmd=_script_command(
+            'openpilot_joystick_sender.py',
+            ['-p control_timeout:=', LaunchConfiguration('control_timeout')],
+        ),
+        output='screen',
+    )
+
+    # Its Comma side, over SSH like the remote bridge (the Docker launch starts it from the host instead)
+    remote_control = ExecuteProcess(
+        condition=_both('start_control', 'start_remote_bridge'),
+        cmd=[
+            'bash',
+            f"{get_package_share_directory('openpilot_ros2_bridge')}/scripts/start_comma_joystick_relay.sh",
+            LaunchConfiguration('remote_bridge_target'),
+            LaunchConfiguration('comma_openpilot_dir'),
+            LaunchConfiguration('control_host_ip'),
+        ],
+        # ssh ends after about 15 s without the Comma (ServerAliveInterval); connect again once it's back
+        respawn=True,
+        respawn_delay=5.0,
+        output='screen',
+    )
+
     return LaunchDescription([
         DeclareLaunchArgument('ros_distro', default_value='jazzy'),
         DeclareLaunchArgument('openpilot_root', default_value='/workspace/openpilot'),
@@ -234,6 +260,10 @@ def generate_launch_description():
             'remote_bridge_command',
             default_value='cd /data/openpilot/openpilot/cereal/messaging 2>/dev/null || cd /data/openpilot/cereal/messaging && exec ./bridge',
         ),
+        DeclareLaunchArgument('comma_openpilot_dir', default_value='/data/openpilot'),
+        DeclareLaunchArgument('start_control', default_value='false'),
+        DeclareLaunchArgument('control_timeout', default_value='0.25'),
+        DeclareLaunchArgument('control_host_ip', default_value=''),
         DeclareLaunchArgument('modelv2_port', default_value='modelV2'),
         DeclareLaunchArgument('longitudinal_plan_port', default_value='longitudinalPlan'),
         DeclareLaunchArgument('lateral_plan_port', default_value='lateralPlan'),
@@ -256,6 +286,7 @@ def generate_launch_description():
         DeclareLaunchArgument('camera_scale', default_value='1.0'),
         DeclareLaunchArgument('camera_jpeg_quality', default_value='80'),
         remote_bridge,
+        remote_control,
         local_bridge,
         TimerAction(
             period=2.0,
@@ -266,6 +297,7 @@ def generate_launch_description():
                 tf_publisher,
                 driver_monitoring_publisher,
                 drivetrain_publisher,
+                joystick_sender,
                 OpaqueFunction(function=_camera_publishers),
             ],
         ),

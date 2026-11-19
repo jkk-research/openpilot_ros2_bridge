@@ -85,6 +85,7 @@ Other useful arguments:
 | `start_driver_monitoring:=false` | Turns off the driver monitoring topics. |
 | `start_drivetrain:=false` | Turns off the decoded CAN messages on `/openpilot/can`. |
 | `publish_arrays:=true` | Also publishes the older `Float32MultiArray` topics (`car_state_*`, `driver_*`, `drivetrain_*` and more). |
+| `start_control:=true` | Lets ROS 2 drive the car through openpilot's joystick mode, from `/openpilot/joystick_command`. See [Drive the car from ROS 2](#4-drive-the-car-from-ros-2-optional). |
 | `mount_source:=true` | Runs this repository's scripts and launch files instead of the copies in the image, for testing local changes. Changes to the message definitions (`msg/`) need `image_name:=openpilot_ros2_bridge:local image_source:=build` instead. |
 
 ## 3. Check it
@@ -114,3 +115,31 @@ Expected rates:
 The topics show up in `ros2 topic list`, but the driver's nodes won't appear in `ros2 node list` from a Humble host. That's expected: the container runs Jazzy, and Humble can't decode its node info.
 
 In RViz or Foxglove, set the fixed frame to your `base_frame` and add the `/openpilot/*_markers` topics.
+
+## 4. Drive the car from ROS 2 (optional)
+
+With `start_control:=true`, your nodes can send acceleration and steering commands to openpilot's joystick mode. openpilot applies them while the driver has engaged it, keeps its own and the panda's limits, and disengages when the brake is pressed.
+In joystick mode, openpilot doesn't follow lead cars or keep the lane: your commands are all it does.
+
+> **Warning:** this lets your software drive the car. Only use it with a driver ready to take over, somewhere safe such as a closed course.
+
+1. Add `start_control:=true` to the launch command from step 2, with the car off. Within a few seconds the log shows `Joystick mode is on for the next drive`.
+2. If the vehicle PC runs a firewall, let the Comma reach TCP port 57078:
+
+   ```bash
+   sudo ufw allow from 192.168.10.26 to any port 57078 proto tcp
+   ```
+
+3. Start the car and engage openpilot with the cruise control. The Comma's screen shows `Joystick Mode`.
+4. Send commands at 10 Hz or faster, from your node or from a host shell with the package built:
+
+   ```bash
+   ros2 topic pub -r 20 /openpilot/joystick_command openpilot_ros2_bridge/msg/JoystickCommand "{accel: 0.5, steer: 0.0}"
+   ```
+
+   `accel` is in m/s² (-4 to 4). `steer` is -1 to 1, positive to the left; on the Lexus RX it is a share of the maximum steering torque.
+   0.25 s after the last command, the car gets accel 0, which holds the speed, and steer 0, which on the Lexus means no steering torque.
+
+`/openpilot/carControl` shows whether openpilot is engaged (`enabled`) and applying your commands (`lat_active`, `long_active`, `actuators`).
+Stop the launch with the car off to switch openpilot back to normal driving. If you stop it during a drive, the car gets accel 0 and steer 0, and openpilot switches back when the drive ends.
+More details are in [Controlling the car](README.md#controlling-the-car).

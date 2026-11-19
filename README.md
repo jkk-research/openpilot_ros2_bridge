@@ -53,6 +53,8 @@ Everything is published as typed ROS 2 messages that mirror openpilot's own (see
 
 All topics are published under the `openpilot` namespace (for example `/openpilot/carState`). Change it with `namespace:=<name>`.
 
+With `start_control:=true`, the bridge also takes acceleration and steering commands from ROS 2 and passes them to openpilot's joystick mode (see [Controlling the car](#controlling-the-car)).
+
 ## Typed messages
 
 Each openpilot service the bridge reads is published as one ROS 2 message that mirrors openpilot's own struct, on a topic named after the service:
@@ -159,6 +161,10 @@ Useful optional arguments:
 - `camera_ip:=<comma_device_ip>` (defaults to `comma_ip`)
 - `camera_scale:=0.5`
 - `camera_jpeg_quality:=80`
+- `start_control:=true` (see [Controlling the car](#controlling-the-car))
+- `control_timeout:=0.25`
+- `control_host_ip:=<pc_ip>`
+- `comma_openpilot_dir:=/data/openpilot`
 
 ## TF frames
 
@@ -325,6 +331,74 @@ Useful arguments:
 - `drivetrain_can_messages:=ENGINE_RPM,GEAR_PACKET`: publish these DBC messages instead of the defaults.
 - `drivetrain_can_dbc:=toyota_tnga_k_pt_generated`: use this opendbc DBC name (the `dbc=` value that `drivetrain_car` shows) instead of looking it up from the fingerprint. Decoding then starts without waiting for `carParams`, but without the car's flags: Honda Bosch cars with a radar, Hyundai CAN-FD cars with LKA steering and the Nissan Altima also need `drivetrain_can_bus:=1`.
 - `drivetrain_can_bus:=0`: decode frames from this CAN bus instead of the brand's default.
+
+## Controlling the car
+
+With `start_control:=true`, your ROS 2 nodes can drive the car through openpilot's joystick mode. They send acceleration and steering commands, and openpilot passes them to the car in place of its own plan.
+openpilot only acts on them while the driver has engaged it. Its own limits and the panda's safety checks stay in place, and pressing the brake disengages as usual.
+In joystick mode openpilot doesn't plan anything itself: it doesn't follow a lead car, stop for obstacles or keep the lane. Your commands are all it does.
+
+> **Warning:** this lets your software drive a real car. Only use it with a driver ready to take over, somewhere safe such as a closed course.
+
+It needs openpilot 0.9.5 or newer, and is tested with the `joystickd` of current openpilot (0.9.8 and newer).
+
+Add it to either launch, together with the remote bridge:
+
+```bash
+ros2 launch /path/to/openpilot_ros2_bridge/launch/openpilot_bridge_docker.launch.py \
+  host_openpilot_root:=/path/to/openpilot comma_ip:=<comma_device_ip> \
+  start_remote_bridge:=true start_control:=true
+```
+
+Then start the car, engage openpilot with the cruise control, and send commands:
+
+```bash
+ros2 topic pub -r 20 /openpilot/joystick_command openpilot_ros2_bridge/msg/JoystickCommand "{accel: 0.5, steer: 0.0}"
+```
+
+The Comma's screen shows `Joystick Mode` with the gas and steering it applies.
+
+`JoystickCommand` has two fields:
+
+| Field | Meaning |
+| --- | --- |
+| `accel` | m/s². Positive speeds up, negative brakes; limited to -4 to 4. 0 holds the current speed, and below 0.3 m/s it stops the car and holds it. Only cars where openpilot controls the speed (openpilot longitudinal control, `carParams.openpilot_longitudinal_control`) follow it. On other cars, the car's own cruise control keeps the speed. |
+| `steer` | -1 to 1, positive steers left. On cars steered by torque, such as the Lexus RX, it is the share of the car's maximum steering torque, and 0 means no torque. On cars steered by angle or curvature, it is the share of the steering angle that gives 3 m/s² of lateral acceleration at the current speed, and 0 means straight ahead. |
+
+On cars steered by torque, `steer` is a torque, not a steering angle. To follow a path, close the loop in your node, for example on `carState.steering_angle_deg`.
+
+Send commands at 10 Hz or faster. The newest one is used for `control_timeout` after it arrives: 0.25 s by default, at most 0.5 s. After that, the car gets accel 0 and steer 0 until the next command, and the log says so. openpilot does the same on the Comma when nothing arrives from the PC for 0.2 s.
+So when commands stop, the car holds its speed and, depending on the car, stops steering or steers straight ahead. The driver has to take over.
+
+`/openpilot/carControl` shows what is in effect:
+
+- `enabled` says whether openpilot is engaged.
+- `lat_active` and `long_active` say whether the steering and acceleration commands are applied.
+- `actuators.accel` and `actuators.torque` are the commands openpilot made from yours.
+
+`/openpilot/carOutput` shows what reached the car after openpilot's limits.
+
+How it works:
+
+- `openpilot_joystick_sender` subscribes to `joystick_command` and sends openpilot's `testJoystick` message to the Comma at 100 Hz, also when there's no command, over ZMQ on TCP port 57078 of this PC. That is the port openpilot's cereal bridge uses for this message.
+- On the Comma, a small relay, [scripts/comma_joystick_relay.py](scripts/comma_joystick_relay.py), runs with openpilot's own Python. The launch copies it to the Comma and starts it over SSH, like the remote bridge, and starts it again when the connection drops. Nothing has to be installed on the Comma.
+- The relay checks each message and passes it to openpilot's `joystickd`, which runs instead of `controlsd` in joystick mode and turns it into `carControl`. Messages that arrive more than 0.1 s late, such as a backlog after a Wi-Fi stall, are dropped.
+- In joystick mode, openpilot also starts its own `joystick_control`, for a gamepad plugged into the Comma. Without a gamepad, it sends zeros that would replace the PC's commands, so the relay takes the message back from it.
+- The PC side runs in the bridge's own image, so there is no separate image for it.
+
+Joystick mode:
+
+- The relay turns joystick mode on for the next drive once the car has been off for 3 s and the PC's sender is running. If nothing arrives from the PC for 5 s while the car is off, it turns joystick mode off again until the PC is back.
+- It only switches joystick mode while the car is off, because openpilot would swap its controls mid-drive. If the car was already on when you launched, that drive uses openpilot's normal controls and the relay says so. Turn the car off and on again to use joystick mode.
+- openpilot turns joystick mode off at the end of every drive. While the launch runs, the relay turns it on again for the next drive.
+- If you turn joystick mode off on the Comma (Developer settings), it stays off until the launch is restarted. It also stays off while one of openpilot's maneuver modes is on.
+- Stopping the launch while the car is off turns joystick mode off, so the next drive uses openpilot normally. Stopping during a drive leaves joystick mode on until that drive ends, with accel 0 and steer 0 for the rest of it.
+
+Network:
+
+- The Comma connects to TCP port 57078 on this PC. If the PC runs a firewall, allow that port, for example `sudo ufw allow from <comma_device_ip> to any port 57078 proto tcp`.
+- The relay reaches the PC at the address its SSH session comes from. If the Comma reaches the PC at a different address, set `control_host_ip:=<pc_ip>`.
+- Without `start_remote_bridge:=true`, start the Comma side yourself: `scripts/start_comma_joystick_relay.sh comma@<comma_device_ip>`.
 
 ## Virtual environment / container workflow
 

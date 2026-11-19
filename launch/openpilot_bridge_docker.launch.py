@@ -3,7 +3,7 @@ import os
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess
 from launch.conditions import IfCondition
-from launch.substitutions import EnvironmentVariable, LaunchConfiguration
+from launch.substitutions import EnvironmentVariable, LaunchConfiguration, PythonExpression
 
 
 _FORWARDED_ARGS = [
@@ -13,6 +13,7 @@ _FORWARDED_ARGS = [
     'start_drivetrain', 'car_output_port', 'car_params_port', 'can_port',
     'drivetrain_can_dbc', 'drivetrain_can_bus', 'drivetrain_can_messages',
     'start_camera', 'cameras', 'camera_ip', 'camera_scale', 'camera_jpeg_quality',
+    'start_control', 'control_timeout',
     'namespace', 'start_tf', 'base_frame', 'openpilot_frame', 'device_frame',
     'device_x', 'device_y', 'device_z', 'use_calibration_height', 'base_frame_height',
 ]
@@ -27,9 +28,8 @@ def _launch_args():
 
 def generate_launch_description():
     # Relative to this file, so the launch also runs straight from a checkout without a colcon build
-    host_runner = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'docker', 'run_openpilot_bridge_host.sh'
-    )
+    root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    host_runner = os.path.join(root, 'docker', 'run_openpilot_bridge_host.sh')
 
     remote_bridge = ExecuteProcess(
         condition=IfCondition(LaunchConfiguration('start_remote_bridge')),
@@ -41,6 +41,25 @@ def generate_launch_description():
                 LaunchConfiguration('remote_bridge_command'),
             ],
         ],
+        output='screen',
+    )
+
+    # The Comma side of start_control:=true: a relay that passes the container's drive commands to joystickd
+    remote_control = ExecuteProcess(
+        condition=IfCondition(PythonExpression([
+            "'", LaunchConfiguration('start_control'), "'.lower() in ('true', '1') and '",
+            LaunchConfiguration('start_remote_bridge'), "'.lower() in ('true', '1')",
+        ])),
+        cmd=[
+            'bash',
+            os.path.join(root, 'scripts', 'start_comma_joystick_relay.sh'),
+            LaunchConfiguration('remote_bridge_target'),
+            LaunchConfiguration('comma_openpilot_dir'),
+            LaunchConfiguration('control_host_ip'),
+        ],
+        # ssh ends after about 15 s without the Comma (ServerAliveInterval); connect again once it's back
+        respawn=True,
+        respawn_delay=5.0,
         output='screen',
     )
 
@@ -124,6 +143,10 @@ def generate_launch_description():
         DeclareLaunchArgument('camera_ip', default_value=LaunchConfiguration('comma_ip')),
         DeclareLaunchArgument('camera_scale', default_value='1.0'),
         DeclareLaunchArgument('camera_jpeg_quality', default_value='80'),
+        DeclareLaunchArgument('start_control', default_value='false'),
+        DeclareLaunchArgument('control_timeout', default_value='0.25'),
+        DeclareLaunchArgument('control_host_ip', default_value=''),
         remote_bridge,
+        remote_control,
         run_container,
     ])
