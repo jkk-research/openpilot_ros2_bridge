@@ -84,6 +84,8 @@ Other useful arguments:
 | `start_camera:=true cameras:=road,wide_road,driver` | Streams the cameras to `/openpilot/<camera>_camera/image_raw` and `.../compressed`. |
 | `start_driver_monitoring:=false` | Turns off the driver monitoring topics. |
 | `start_drivetrain:=false` | Turns off the decoded CAN messages on `/openpilot/can`. |
+| `start_radar:=true` | Publishes openpilot's radar data: the leads it tracks on `/openpilot/radarState` and every radar track on `/openpilot/radarTracks`. |
+| `start_radar_can:=true` | Publishes the radar's own CAN messages and the blind spot monitor's messages, decoded with opendbc, on `/openpilot/radar_can`. |
 | `publish_arrays:=true` | Also publishes the older `Float32MultiArray` topics (`car_state_*`, `driver_*`, `drivetrain_*` and more). |
 | `start_control:=true` | Lets ROS 2 drive the car through openpilot's joystick mode, from `/openpilot/joystick_command`. See [Drive the car from ROS 2](#4-drive-the-car-from-ros-2-optional). |
 | `mount_source:=true` | Runs this repository's scripts and launch files instead of the copies in the image, for testing local changes. Changes to the message definitions (`msg/`) need `image_name:=openpilot_ros2_bridge:local image_source:=build` instead. |
@@ -109,6 +111,8 @@ Expected rates:
 | `extrinsicsCalibration` (`liveCalibration` on older openpilot) | ~4 Hz |
 | `carParams` | every 50 s, latched |
 | `can` | every decoded drivetrain frame, about 280 per second on a Lexus RX, starting after the first `carParams` (up to 50 s) |
+| `radarState`, `radarTracks` (with `start_radar:=true`) | ~20 Hz |
+| `radar_can` (with `start_radar_can:=true`) | every decoded radar frame, about 630 per second on a Lexus RX, starting after the first `carParams` (up to 50 s) |
 | `*_camera/image_raw*` (with `start_camera:=true`) | ~20 Hz while onroad |
 | `lateralPlan` | only on older openpilot versions that still publish it |
 

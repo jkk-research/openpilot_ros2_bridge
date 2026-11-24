@@ -72,7 +72,11 @@ def _both(first, second):
 
 
 def generate_launch_description():
-    bridge_topics = LaunchConfiguration('bridge_topics')
+    # The radar services join the bridged ones with start_radar:=true (liveTracks is radarTracks' older name)
+    bridge_topics = PythonExpression([
+        "'", LaunchConfiguration('bridge_topics'), "' + (',radarState,radarTracks,liveTracks' if '",
+        LaunchConfiguration('start_radar'), "'.lower() in ('true', '1') else '')",
+    ])
 
     local_bridge = ExecuteProcess(
         condition=IfCondition(LaunchConfiguration('start_bridge')),
@@ -124,6 +128,7 @@ def generate_launch_description():
                 ' -p driver_state_port:=', LaunchConfiguration('driver_state_port'),
                 ' -p driver_monitoring_state_port:=', LaunchConfiguration('driver_monitoring_state_port'),
                 ' -p driver_monitoring:=', LaunchConfiguration('start_driver_monitoring'),
+                ' -p radar:=', LaunchConfiguration('start_radar'),
                 ' -p openpilot_frame:=', LaunchConfiguration('openpilot_frame'),
             ],
         ),
@@ -197,6 +202,23 @@ def generate_launch_description():
                 ' -p can_bus:=', LaunchConfiguration('drivetrain_can_bus'),
                 ' -p can_messages:=', LaunchConfiguration('drivetrain_can_messages'),
                 ' -p publish_arrays:=', LaunchConfiguration('publish_arrays'),
+            ],
+        ),
+        output='screen',
+    )
+
+    # The car's radar CAN messages, decoded with opendbc, only with start_radar_can:=true
+    radar_can_publisher = ExecuteProcess(
+        condition=IfCondition(LaunchConfiguration('start_radar_can')),
+        cmd=_script_command(
+            'openpilot_radar_can_publisher.py',
+            [
+                '-p car_params_port:=', LaunchConfiguration('car_params_port'),
+                ' -p can_port:=', LaunchConfiguration('can_port'),
+                ' -p can_dbc:=', LaunchConfiguration('radar_can_dbc'),
+                ' -p can_bus:=', LaunchConfiguration('radar_can_bus'),
+                ' -p can_messages:=', LaunchConfiguration('radar_can_messages'),
+                ' -p blind_spot:=', LaunchConfiguration('radar_can_blind_spot'),
             ],
         ),
         output='screen',
@@ -280,6 +302,12 @@ def generate_launch_description():
         DeclareLaunchArgument('drivetrain_can_dbc', default_value='auto'),
         DeclareLaunchArgument('drivetrain_can_bus', default_value='-1'),
         DeclareLaunchArgument('drivetrain_can_messages', default_value='default'),
+        DeclareLaunchArgument('start_radar', default_value='false'),
+        DeclareLaunchArgument('start_radar_can', default_value='false'),
+        DeclareLaunchArgument('radar_can_dbc', default_value='auto'),
+        DeclareLaunchArgument('radar_can_bus', default_value='-1'),
+        DeclareLaunchArgument('radar_can_messages', default_value='default'),
+        DeclareLaunchArgument('radar_can_blind_spot', default_value='true'),
         DeclareLaunchArgument('start_camera', default_value='false'),
         DeclareLaunchArgument('cameras', default_value='road'),
         DeclareLaunchArgument('camera_ip', default_value=LaunchConfiguration('comma_ip')),
@@ -297,6 +325,7 @@ def generate_launch_description():
                 tf_publisher,
                 driver_monitoring_publisher,
                 drivetrain_publisher,
+                radar_can_publisher,
                 joystick_sender,
                 OpaqueFunction(function=_camera_publishers),
             ],

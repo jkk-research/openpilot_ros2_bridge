@@ -14,7 +14,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.qos import DurabilityPolicy, QoSProfile
-from rosidl_parser.definition import AbstractSequence, BasicType, NamespacedType
+from rosidl_parser.definition import AbstractGenericString, AbstractSequence, BasicType, NamespacedType
 
 import openpilot_ros2_bridge.msg as op_msgs
 
@@ -30,8 +30,13 @@ SERVICES = [
     ('driverStateV2', 'DriverStateV2', 'driver_state_port'),
     ('driverMonitoringState', 'DriverMonitoringState', 'driver_monitoring_state_port'),
     ('extrinsicsCalibration', 'ExtrinsicsCalibration', None),
+    ('radarState', 'RadarState', None),
+    ('radarTracks', 'RadarData', None),
 ]
 DRIVER_MONITORING = {'driverStateV2', 'driverMonitoringState'}
+RADAR = {'radarState', 'radarTracks'}
+# Older openpilot versions' names for a service, published on a topic of that name
+OLD_NAMES = {'extrinsicsCalibration': 'liveCalibration', 'radarTracks': 'liveTracks'}
 # Every top-level message starts with these; they come from the Event, not from the struct
 EVENT_FIELDS = {'header', 'log_mono_time', 'valid'}
 FLOAT_TYPES = {'float', 'double', 'long double'}
@@ -60,6 +65,29 @@ def fill_nan(msg):
     return msg
 
 
+def same_layout(slot, proto):
+    # Whether an openpilot field still has the layout the message field was generated from; e.g.
+    # radarState.radarErrors was a list of enums before openpilot 0.10
+    if proto.which() == 'group':
+        return isinstance(slot, NamespacedType)
+    capnp_type = proto.slot.type
+    kind = capnp_type.which()
+    if kind == 'list':
+        if not isinstance(slot, AbstractSequence):
+            return False
+        elem = capnp_type.list.elementType.which()
+        if elem in ('struct', 'list'):
+            return isinstance(slot.value_type, NamespacedType)
+        if elem == 'text':
+            return isinstance(slot.value_type, AbstractGenericString)
+        return isinstance(slot.value_type, BasicType)
+    if kind == 'struct':
+        return isinstance(slot, NamespacedType)
+    if kind == 'text':
+        return isinstance(slot, AbstractGenericString)
+    return isinstance(slot, BasicType)
+
+
 def coverage(msg_type, struct_schema):
     # How many of the message's own fields the running openpilot's struct has
     names = {snake(name) for name in struct_schema.fields}
@@ -82,8 +110,11 @@ class CapnpToRos:
         steps = []
         for field, slot in zip(msg_type.get_fields_and_field_types(), msg_type.SLOT_TYPES):
             name = by_snake.get(field)
+            if name is not None and not same_layout(slot, capnp_fields[name].proto):
+                name = None
             if name is None:
-                # Not in this openpilot version: floats read NaN, also inside a nested message; everything else keeps its default
+                # Not in this openpilot version, or in another layout: floats read NaN, also inside a nested
+                # message; everything else keeps its default
                 if isinstance(slot, BasicType) and slot.typename in FLOAT_TYPES:
                     steps.append((field, None, 'nan', None))
                 elif isinstance(slot, NamespacedType):
@@ -161,22 +192,28 @@ class OpenPilotTypedPublisher(Node):
             if port:
                 self.declare_parameter(port, '')
         self.declare_parameter("driver_monitoring", True, ParameterDescriptor(dynamic_typing=True))
+        self.declare_parameter("radar", False, ParameterDescriptor(dynamic_typing=True))
         self.declare_parameter("openpilot_frame", "openpilot")
         self.openpilot_frame = self.get_parameter("openpilot_frame").value
 
         self.converter = CapnpToRos()
         self.cereal_threads = []
         for service, msg_name, port in SERVICES:
-            if service in DRIVER_MONITORING and str(self.get_parameter("driver_monitoring").value).lower() not in ('true', '1'):
+            if service in DRIVER_MONITORING and not self.enabled("driver_monitoring"):
+                continue
+            if service in RADAR and not self.enabled("radar"):
                 continue
             source = self.get_parameter(port).value if port else ''
             if not source:
                 source = service
-            if service == 'extrinsicsCalibration' and source not in messaging.SERVICE_LIST:
-                # Older openpilot versions call it liveCalibration
-                source = 'liveCalibration'
+            if service in OLD_NAMES and source not in messaging.SERVICE_LIST:
+                source = OLD_NAMES[service]
             if source not in messaging.SERVICE_LIST or source not in log.Event.schema.fields:
                 self.get_logger().info(f"Skipping {service}: this openpilot version has no {source} service")
+                continue
+            if log.Event.schema.fields[source].proto.slot.type.which() != 'struct':
+                # liveTracks before 2024 was a list of another struct
+                self.get_logger().info(f"Skipping {service}: this openpilot version's {source} has an older layout")
                 continue
 
             msg_type = getattr(op_msgs, msg_name)
@@ -195,7 +232,7 @@ class OpenPilotTypedPublisher(Node):
                 qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
             else:
                 qos = 10
-            publisher = self.create_publisher(msg_type, source if service == 'extrinsicsCalibration' else service, qos)
+            publisher = self.create_publisher(msg_type, source if service in OLD_NAMES else service, qos)
             frame_id = self.openpilot_frame if service == 'modelV2' else ''
 
             sock = messaging.sub_sock(source)
@@ -207,6 +244,9 @@ class OpenPilotTypedPublisher(Node):
             self.cereal_threads.append(thread)
 
         self.get_logger().info("OpenPilot typed publisher is ready.")
+
+    def enabled(self, parameter):
+        return str(self.get_parameter(parameter).value).lower() in ('true', '1')
 
     def cereal_loop(self, sock, source, msg_type, publisher, frame_id):
         last_error = -math.inf

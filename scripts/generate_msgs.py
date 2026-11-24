@@ -28,6 +28,9 @@ SERVICES = [
     ("driverStateV2", "DriverStateV2", ["driverStateV2"]),
     ("driverMonitoringState", "DriverMonitoringState", ["driverMonitoringState"]),
     ("extrinsicsCalibration", "ExtrinsicsCalibration", ["extrinsicsCalibration", "liveCalibration"]),
+    ("radarState", "RadarState", ["radarState"]),
+    # liveTracks before openpilot renamed it in August 2026; before 2024 it was a list of another struct
+    ("radarTracks", "RadarData", ["radarTracks", "liveTracks"]),
 ]
 PRIMITIVES = {
     "bool": "bool", "int8": "int8", "int16": "int16", "int32": "int32", "int64": "int64",
@@ -36,6 +39,8 @@ PRIMITIVES = {
 }
 # Every top-level message starts with these, so no openpilot field may use the names
 RESERVED = {"header", "log_mono_time", "valid"}
+# Struct names too generic to be a message type on their own; they get their parent's name in front
+GENERIC_NAMES = {"Error"}
 
 
 def snake(name):
@@ -97,6 +102,9 @@ class Generator:
         tops = {}
         for topic, ros_name, fields in SERVICES:
             field = next((f for f in fields if f in self.event.fields), None)
+            if field is not None and self.event.fields[field].proto.slot.type.which() != "struct":
+                print(f"Skipping {topic}: {field} isn't a struct in this openpilot's schema")
+                continue
             if field is None:
                 print(f"Skipping {topic}: this openpilot's schema has no {' or '.join(fields)}")
                 continue
@@ -113,8 +121,8 @@ class Generator:
                 continue
             dn = schema.node.displayName
             base = short(dn)
-            if len(by_short[base]) > 1 or base in tops.values():
-                # Same short name for different structs: prefix with the parent struct
+            if len(by_short[base]) > 1 or base in tops.values() or base in GENERIC_NAMES:
+                # Same short name for different structs, or a generic one: prefix with the parent struct
                 parent = dn.split(":")[-1].rsplit(".", 1)[0].split(".")[-1]
                 base = parent + base[0].upper() + base[1:]
             self.names[sid] = base[0].upper() + base[1:]

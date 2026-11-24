@@ -46,6 +46,7 @@ Everything is published as typed ROS 2 messages that mirror openpilot's own (see
 
 - typed ROS 2 messages that mirror openpilot's own, one topic per openpilot service: `carState`, `carControl`, `carOutput`, `carParams`, `modelV2`, `longitudinalPlan`, `lateralPlan` (older openpilot), `driverStateV2`, `driverMonitoringState` and `extrinsicsCalibration` (see [Typed messages](#typed-messages))
 - drivetrain CAN messages (engine RPM, pedal positions, brake force, gear and more), decoded with opendbc and published as typed `CanMessage`s (see [Drivetrain](#drivetrain))
+- optional radar data: openpilot's `radarState` and `radarTracks`, and the radar's own CAN messages decoded with opendbc (see [Radar](#radar))
 - RViz marker topics for plan, lane lines, road edges, and leads
 - TF frames for openpilot's calibrated frame and the Comma device, driven by openpilot calibration
 - optional road, wide road, and driver camera streams as raw and JPEG-compressed images
@@ -71,7 +72,10 @@ Each openpilot service the bridge reads is published as one ROS 2 message that m
 | `driverStateV2` | `DriverStateV2` | 20 Hz |
 | `driverMonitoringState` | `DriverMonitoringState` | 20 Hz; needs openpilot 0.11.1 or newer |
 | `extrinsicsCalibration` | `ExtrinsicsCalibration` | 4 Hz; the topic is `liveCalibration` on older openpilot |
+| `radarState` | `RadarState` | 20 Hz, with `start_radar:=true` |
+| `radarTracks` | `RadarData` | 20 Hz, with `start_radar:=true`; the topic is `liveTracks` on older openpilot |
 | `can` | `CanMessage` | one per decoded drivetrain CAN frame |
+| `radar_can` | `CanMessage` | one per decoded radar CAN frame, with `start_radar_can:=true` |
 
 Each topic needs its openpilot service in `bridge_topics`; the default list has them all.
 
@@ -156,6 +160,7 @@ Useful optional arguments:
 - `start_driver_monitoring:=false`
 - `start_drivetrain:=false`
 - `drivetrain_can_messages:=ENGINE_RPM,GEAR_PACKET`
+- `start_radar:=true`, `start_radar_can:=true` (see [Radar](#radar))
 - `start_camera:=true`
 - `cameras:=road,wide_road,driver`
 - `camera_ip:=<comma_device_ip>` (defaults to `comma_ip`)
@@ -331,6 +336,67 @@ Useful arguments:
 - `drivetrain_can_messages:=ENGINE_RPM,GEAR_PACKET`: publish these DBC messages instead of the defaults.
 - `drivetrain_can_dbc:=toyota_tnga_k_pt_generated`: use this opendbc DBC name (the `dbc=` value that `drivetrain_car` shows) instead of looking it up from the fingerprint. Decoding then starts without waiting for `carParams`, but without the car's flags: Honda Bosch cars with a radar, Hyundai CAN-FD cars with LKA steering and the Nissan Altima also need `drivetrain_can_bus:=1`.
 - `drivetrain_can_bus:=0`: decode frames from this CAN bus instead of the brand's default.
+
+## Radar
+
+Two options publish the car's radar, both off by default.
+
+`start_radar:=true` publishes openpilot's radar services as typed messages:
+
+| Topic | Type | Rate | Contents |
+| --- | --- | --- | --- |
+| `radarState` | `RadarState` | 20 Hz | The two leads openpilot tracks, `lead_one` and `lead_two`: distance from the front bumper (`d_rel`), lateral offset (`y_rel`, positive to the left), relative and absolute speed, filtered lead speed and acceleration, and whether the radar sees the lead (`radar`, `radar_track_id`) or only the camera model (`model_prob`). Also the radar's error flags. |
+| `radarTracks` | `RadarData` | 20 Hz | Every track the car's radar reports, as openpilot reads it: `track_id`, `d_rel`, `y_rel` and `v_rel` per point, and the error flags. On openpilot before August 2026 the topic is `liveTracks`. Needs openpilot 0.10.0 or newer. |
+
+The launch adds both services to the bridged ones itself, also when you set `bridge_topics`.
+On openpilot 0.9.8 and older, `radarState.radar_errors` had another layout and keeps its default.
+
+`start_radar_can:=true` decodes the radar's own CAN messages with opendbc and publishes every frame as a `CanMessage` on `/openpilot/radar_can`, the same way the drivetrain node does on `can`.
+By default it decodes the messages openpilot itself reads from the car's radar: the DBC, bus and messages of opendbc's radar interface for the fingerprint in `carParams`. So it starts after the first `carParams`, up to 50 s after launch.
+Values are in the DBC's units and signs, which can differ from openpilot's. On the Lexus RX, `LAT_DIST` is positive to the right, while `y_rel` in `radarTracks` is positive to the left.
+Like the drivetrain decoding, this needs openpilot 0.10.0 or newer.
+
+On a Lexus RX (TSS2), the radar is on CAN bus 1 and uses the `toyota_tss2_adas` DBC:
+
+- `TRACK_A_0` to `TRACK_A_15`: one per radar track, with `LONG_DIST` and `LAT_DIST` (m), `REL_SPEED` (m/s), `VALID` and `NEW_TRACK`.
+- `TRACK_B_0` to `TRACK_B_15`: the same tracks' `REL_ACCEL` and `SCORE`.
+- `STATUS_MSG`: `RADAR_STATUS`, `INVALID_COUNTER` and `RADAR_PRE_FAULT`.
+
+Each track message arrives at 20 Hz and `STATUS_MSG` at 10 Hz, about 630 frames per second in all.
+Cars where openpilot doesn't read the radar (`carParams.radar_unavailable`) publish no front radar frames on `radar_can` unless you set `radar_can_dbc`.
+
+Useful arguments:
+
+- `radar_can_dbc:=toyota_tss2_adas`: decode with this opendbc DBC instead of the car's radar DBC. Decoding then starts without waiting for `carParams`, on bus 1 unless `radar_can_bus` says otherwise, and with every message in the DBC unless `radar_can_messages` lists some.
+- `radar_can_bus:=1`: decode frames from this CAN bus.
+- `radar_can_messages:=TRACK_A_0,TRACK_B_0`: decode only these DBC messages.
+- `radar_can_blind_spot:=false`: leave out the blind spot messages (see [Rear radars and blind spot monitoring](#rear-radars-and-blind-spot-monitoring)).
+
+### Rear radars and blind spot monitoring
+
+On the Lexus RX, the rear corner radars don't send their tracks to the CAN buses the Comma sees. What reaches them is the blind spot monitor's verdict per side. For other brands, too, opendbc only describes such per-side messages.
+`start_radar_can:=true` publishes those messages on `radar_can` too: the ones openpilot reads for `carState.left_blindspot` and `right_blindspot`, from the car's own DBCs, on whichever of buses 0 to 2 they arrive:
+
+| Brand | Messages |
+| --- | --- |
+| Toyota, Lexus | `BSM` |
+| Hyundai, Kia, Genesis | `LCA11`, `ADAS_CMD_50_50ms` (CAN FD) |
+| GM | `BCMBlindSpotMonitor` |
+| Ford | `Side_Detect_L_Stat`, `Side_Detect_R_Stat` |
+| Chrysler | `BSM_1`, `BSM_LEFT`, `BSM_RIGHT` |
+| Subaru | `BSD_RCTA` (also rear cross traffic) |
+| Volkswagen group | `SWA_01`, `SWA_1`, `MEB_Side_Assist_01` |
+| Honda, Acura | `BSM_STATUS_LEFT`, `BSM_STATUS_RIGHT` (only with B-CAN forwarded to the Comma) |
+| Mazda | `BSM` |
+| Tesla | `DAS_status` |
+| BYD | `BSD_RADAR` |
+
+They're decoded whenever the car sends them, also when openpilot itself doesn't use them, so they can show more than `carState`.
+On the Lexus RX, for example, openpilot doesn't turn on blind spot monitoring, so `left_blindspot` and `right_blindspot` always read false. A likely reason is that `BSM` is too slow for openpilot's first second of car detection.
+There, `BSM` arrives on bus 0 about once per second, with `L_ADJACENT`, `L_APPROACHING`, `R_ADJACENT` and `R_APPROACHING` (a vehicle next to the car or closing in, per side) and `ADJACENT_ENABLED` and `APPROACHING_ENABLED` (whether the driver has each warning switched on).
+The logs this was checked against had no vehicle in the blind spot, so the warning bits were never seen set.
+Distances, speeds or tracks from the rear radars aren't on the bus. The radar bus also carries 28 messages that opendbc doesn't describe; what they hold is unknown.
+Turn the blind spot messages off with `radar_can_blind_spot:=false`.
 
 ## Controlling the car
 
