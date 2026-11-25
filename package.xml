@@ -13,10 +13,12 @@
 
   <exec_depend>rosidl_default_runtime</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>can_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>rclpy</exec_depend>
+  <exec_depend>ros2_socketcan_msgs</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>visualization_msgs</exec_depend>
 

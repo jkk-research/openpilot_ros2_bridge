@@ -26,10 +26,13 @@ RUN apt-get update && apt-get install -y \
     && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# CycloneDDS for hosts whose ROS 2 stack uses it, plus what scripts/build_openpilot_minimal.sh
-# needs to build msgq and the cereal bridge (libzmq is also the bridge's runtime dependency)
+# CycloneDDS for hosts whose ROS 2 stack uses it, the standard CAN message types of the raw CAN frame topics,
+# plus what scripts/build_openpilot_minimal.sh needs to build msgq and the cereal bridge (libzmq is also the
+# bridge's runtime dependency)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-jazzy-rmw-cyclonedds-cpp \
+    ros-jazzy-can-msgs \
+    ros-jazzy-ros2-socketcan-msgs \
     libzmq3-dev \
     python3-dev \
     g++ \

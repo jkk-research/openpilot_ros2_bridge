@@ -25,7 +25,7 @@ ros2 launch /path/to/openpilot_ros2_bridge/launch/openpilot_bridge_docker.launch
 
 ### Option B: Local install
 
-Build openpilot natively ([instructions](https://github.com/commaai/openpilot/tree/master/tools#native-setup-on-ubuntu-2404-and-macos)) and create the bridge venv once with `./scripts/setup_bridge_venv.sh`. Then build this package in a ROS 2 Jazzy workspace and launch it:
+Build openpilot natively ([instructions](https://github.com/commaai/openpilot/tree/master/tools#native-setup-on-ubuntu-2404-and-macos)), install the standard CAN message types (`sudo apt install ros-jazzy-can-msgs ros-jazzy-ros2-socketcan-msgs`) and create the bridge venv once with `./scripts/setup_bridge_venv.sh`. Then build this package in a ROS 2 Jazzy workspace and launch it:
 
 ```bash
 cd /path/to/ros2_ws
@@ -46,6 +46,7 @@ Everything is published as typed ROS 2 messages that mirror openpilot's own (see
 
 - typed ROS 2 messages that mirror openpilot's own, one topic per openpilot service: `carState`, `carControl`, `carOutput`, `carParams`, `modelV2`, `longitudinalPlan`, `lateralPlan` (older openpilot), `driverStateV2`, `driverMonitoringState` and `extrinsicsCalibration` (see [Typed messages](#typed-messages))
 - drivetrain CAN messages (engine RPM, pedal positions, brake force, gear and more), decoded with opendbc and published as typed `CanMessage`s (see [Drivetrain](#drivetrain))
+- every raw CAN frame the Comma receives, undecoded, as standard `can_msgs/Frame` messages (see [Raw CAN frames](#raw-can-frames))
 - optional radar data: openpilot's `radarState` and `radarTracks`, and the radar's own CAN messages decoded with opendbc (see [Radar](#radar))
 - RViz marker topics for plan, lane lines, road edges, and leads
 - TF frames for openpilot's calibrated frame and the Comma device, driven by openpilot calibration
@@ -110,14 +111,20 @@ The Docker version then needs an image built from your checkout as well (`image_
 1. Install ROS 2 Jazzy.
 2. Have an openpilot checkout available locally.
 3. Build the openpilot messaging bridge in that checkout by following the official openpilot setup instructions: https://github.com/commaai/openpilot/tree/master/tools#native-setup-on-ubuntu-2404-and-macos
-4. Create the bridge virtual environment:
+4. Install the standard CAN message types that the raw CAN frames use:
+
+   ```bash
+   sudo apt install ros-jazzy-can-msgs ros-jazzy-ros2-socketcan-msgs
+   ```
+
+5. Create the bridge virtual environment:
 
    ```bash
    cd /path/to/openpilot_ros2_bridge
    ./scripts/setup_bridge_venv.sh
    ```
 
-5. Build this repository in a ROS 2 workspace:
+6. Build this repository in a ROS 2 workspace:
 
    ```bash
    cd /path/to/ros2_ws
@@ -160,6 +167,7 @@ Useful optional arguments:
 - `start_driver_monitoring:=false`
 - `start_drivetrain:=false`
 - `drivetrain_can_messages:=ENGINE_RPM,GEAR_PACKET`
+- `start_can_frames:=false` (see [Raw CAN frames](#raw-can-frames))
 - `start_radar:=true`, `start_radar_can:=true` (see [Radar](#radar))
 - `start_camera:=true`
 - `cameras:=road,wide_road,driver`
@@ -270,7 +278,7 @@ The drivetrain node is on by default (`start_drivetrain:=true`).
 It decodes the car's drivetrain CAN messages and publishes every frame as a typed `CanMessage` on `/openpilot/can` (see below).
 The car's state, what openpilot sent to it and the car's parameters are in the typed `carState`, `carOutput` and `carParams` topics.
 The node reads `carParams` and the raw `can` stream through the local bridge, so keep both in `bridge_topics` if you override it.
-If you turn the node off, you can drop `can` from `bridge_topics`: it is the largest stream, 100 batches per second and about 100 kB/s on a Lexus RX.
+If you turn the node off together with the raw CAN frames (`start_can_frames:=false`, see [Raw CAN frames](#raw-can-frames)), you can drop `can` from `bridge_topics`: it is the largest stream, 100 batches per second and about 100 kB/s on a Lexus RX.
 
 ### Array topics
 
@@ -336,6 +344,39 @@ Useful arguments:
 - `drivetrain_can_messages:=ENGINE_RPM,GEAR_PACKET`: publish these DBC messages instead of the defaults.
 - `drivetrain_can_dbc:=toyota_tnga_k_pt_generated`: use this opendbc DBC name (the `dbc=` value that `drivetrain_car` shows) instead of looking it up from the fingerprint. Decoding then starts without waiting for `carParams`, but without the car's flags: Honda Bosch cars with a radar, Hyundai CAN-FD cars with LKA steering and the Nissan Altima also need `drivetrain_can_bus:=1`.
 - `drivetrain_can_bus:=0`: decode frames from this CAN bus instead of the brand's default.
+
+## Raw CAN frames
+
+The raw CAN frame node is on by default (`start_can_frames:=true`).
+It publishes every CAN frame the Comma receives, undecoded, as a standard [`can_msgs/Frame`](https://github.com/ros-industrial/ros_canopen/blob/dashing-devel/can_msgs/msg/Frame.msg) on `/openpilot/can_frames`.
+That is one message per frame, from all buses in one stream, in the order openpilot received them.
+The node reads the raw `can` stream through the local bridge, so keep `can` in `bridge_topics` if you override it.
+For decoded signals instead, see `can` under [Drivetrain](#drivetrain) and `radar_can` under [Radar](#radar).
+
+| Field | Contents |
+| --- | --- |
+| `header.stamp` | When the frame's batch arrived. openpilot sends the frames in batches, 100 per second, without a time per frame, so all frames of a batch get the same stamp. |
+| `header.frame_id` | The CAN bus the frame is on, as openpilot numbers it: `can0`, `can1` or `can2` for frames from the car. `can0_sent` to `can2_sent` are frames openpilot sent, once the panda has put them on the bus. `can0_blocked` to `can2_blocked` are frames openpilot tried to send that the panda's safety checks blocked, so they never reached the bus. |
+| `id` | The CAN ID. |
+| `is_extended` | True for IDs from 0x800 up. openpilot doesn't pass on whether a frame used an extended ID, so a 29-bit ID below 0x800 reads as a standard one; openpilot itself sends frames the same way. |
+| `dlc` | The number of data bytes, 0 to 8. |
+| `data` | The data bytes, padded with zeros to 8. |
+| `is_rtr`, `is_error` | Always false: openpilot doesn't pass on remote or error frames. |
+
+Which bus carries what depends on the car and its harness. Usually bus 0 is the car side of the harness and bus 2 the side of the car's own camera; on the Lexus RX, the radar is on bus 1 (see [Radar](#radar)).
+
+CAN FD frames longer than 8 bytes, which Hyundai, Kia and Genesis CAN-FD cars among others send, don't fit a `can_msgs/Frame`.
+They go to `/openpilot/can_fd_frames` instead, as [`ros2_socketcan_msgs/FdFrame`](https://github.com/autowarefoundation/ros2_socketcan/blob/main/ros2_socketcan_msgs/msg/FdFrame.msg): the same `header`, `id` and `is_extended`, with `len` (12 to 64) and `data`.
+CAN FD frames of 8 bytes or less are on `can_frames`, because openpilot doesn't say which frames are CAN FD. On a CAN FD car, subscribe to both topics to get every frame.
+
+Every frame is its own message, a few thousand per second (about 4,000 on a Lexus RX, judging by the size of its `can` stream), so the node needs a noticeable share of a CPU core while something subscribes. While nothing subscribes, it does no work.
+
+To receive the frames, a host needs the two message packages, which ROS 2 Humble and Jazzy have; the Docker image already includes them:
+
+```bash
+sudo apt install ros-$ROS_DISTRO-can-msgs ros-$ROS_DISTRO-ros2-socketcan-msgs
+ros2 topic echo /openpilot/can_frames --once
+```
 
 ## Radar
 
@@ -469,7 +510,7 @@ Network:
 ## Virtual environment / container workflow
 
 The `docker/Dockerfile` provides a ROS 2 Jazzy environment for the bridge.
-It copies the local repository into `/workspace/ros2_ws/src/openpilot_ros2_bridge`, creates a dedicated bridge `.venv`, installs the required Python packages there, builds the ROS 2 package with `colcon`, and expects only an openpilot source checkout to be bind-mounted at runtime.
+It installs the standard CAN message types, copies the local repository into `/workspace/ros2_ws/src/openpilot_ros2_bridge`, creates a dedicated bridge `.venv`, installs the required Python packages there, builds the ROS 2 package with `colcon`, and expects only an openpilot source checkout to be bind-mounted at runtime.
 
 Build the image manually:
 
@@ -531,7 +572,7 @@ docker run --rm --network host --ipc host --user "$(id -u):$(id -g)" -e HOME=/tm
 ## Published container image
 
 `.github/workflows/publish-docker.yml` publishes the Docker image to GHCR on pushes to `main`, version tags, and manual runs.
-The image includes CycloneDDS and the tools `prepare_openpilot` needs, so no local image build is required.
+The image includes CycloneDDS, the standard CAN message types and the tools `prepare_openpilot` needs, so no local image build is required.
 
 To pull it by hand:
 

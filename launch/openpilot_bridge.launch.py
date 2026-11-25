@@ -207,6 +207,16 @@ def generate_launch_description():
         output='screen',
     )
 
+    # Every raw CAN frame as a standard can_msgs/Frame, on by default (start_can_frames)
+    can_frame_publisher = ExecuteProcess(
+        condition=IfCondition(LaunchConfiguration('start_can_frames')),
+        cmd=_script_command(
+            'openpilot_can_frame_publisher.py',
+            ['-p can_port:=', LaunchConfiguration('can_port')],
+        ),
+        output='screen',
+    )
+
     # The car's radar CAN messages, decoded with opendbc, only with start_radar_can:=true
     radar_can_publisher = ExecuteProcess(
         condition=IfCondition(LaunchConfiguration('start_radar_can')),
@@ -302,6 +312,7 @@ def generate_launch_description():
         DeclareLaunchArgument('drivetrain_can_dbc', default_value='auto'),
         DeclareLaunchArgument('drivetrain_can_bus', default_value='-1'),
         DeclareLaunchArgument('drivetrain_can_messages', default_value='default'),
+        DeclareLaunchArgument('start_can_frames', default_value='true'),
         DeclareLaunchArgument('start_radar', default_value='false'),
         DeclareLaunchArgument('start_radar_can', default_value='false'),
         DeclareLaunchArgument('radar_can_dbc', default_value='auto'),
@@ -325,6 +336,7 @@ def generate_launch_description():
                 tf_publisher,
                 driver_monitoring_publisher,
                 drivetrain_publisher,
+                can_frame_publisher,
                 radar_can_publisher,
                 joystick_sender,
                 OpaqueFunction(function=_camera_publishers),

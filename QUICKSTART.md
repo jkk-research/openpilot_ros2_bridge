@@ -50,6 +50,12 @@ source install/setup.bash
 
 Rebuild it after every `git pull` of this repository. The launch pulls the newest image, which follows `main`, and with different message definitions on the two sides your nodes read wrong values without any error. The launch compares your build in `~/ros2_ws` (or the one your shell has sourced) with the image and prints a warning when they differ.
 
+The raw CAN frames on `/openpilot/can_frames` use the standard `can_msgs/Frame` type instead (see [Raw CAN frames](README.md#raw-can-frames)). To receive them on the host, install that once, with the CAN FD type next to it:
+
+```bash
+sudo apt install ros-humble-can-msgs ros-humble-ros2-socketcan-msgs
+```
+
 After that, `ros2 launch openpilot_ros2_bridge openpilot_bridge_docker.launch.py ...` with the same arguments works too.
 
 The launch file does the following, and does each step only when it's needed:
@@ -84,6 +90,7 @@ Other useful arguments:
 | `start_camera:=true cameras:=road,wide_road,driver` | Streams the cameras to `/openpilot/<camera>_camera/image_raw` and `.../compressed`. |
 | `start_driver_monitoring:=false` | Turns off the driver monitoring topics. |
 | `start_drivetrain:=false` | Turns off the decoded CAN messages on `/openpilot/can`. |
+| `start_can_frames:=false` | Turns off the raw CAN frames on `/openpilot/can_frames` and `/openpilot/can_fd_frames`. |
 | `start_radar:=true` | Publishes openpilot's radar data: the leads it tracks on `/openpilot/radarState` and every radar track on `/openpilot/radarTracks`. |
 | `start_radar_can:=true` | Publishes the radar's own CAN messages and the blind spot monitor's messages, decoded with opendbc, on `/openpilot/radar_can`. |
 | `publish_arrays:=true` | Also publishes the older `Float32MultiArray` topics (`car_state_*`, `driver_*`, `drivetrain_*` and more). |
@@ -111,6 +118,7 @@ Expected rates:
 | `extrinsicsCalibration` (`liveCalibration` on older openpilot) | ~4 Hz |
 | `carParams` | every 50 s, latched |
 | `can` | every decoded drivetrain frame, about 280 per second on a Lexus RX, starting after the first `carParams` (up to 50 s) |
+| `can_frames` | every raw CAN frame of all buses, a few thousand per second; `can_fd_frames` only on CAN FD cars |
 | `radarState`, `radarTracks` (with `start_radar:=true`) | ~20 Hz |
 | `radar_can` (with `start_radar_can:=true`) | every decoded radar frame, about 630 per second on a Lexus RX, starting after the first `carParams` (up to 50 s) |
 | `*_camera/image_raw*` (with `start_camera:=true`) | ~20 Hz while onroad |
