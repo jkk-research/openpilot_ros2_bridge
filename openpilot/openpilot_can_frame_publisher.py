@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Publishes every CAN frame the Comma receives, undecoded, as a standard can_msgs/Frame on can_frames.
+"""Publishes every frame of openpilot's can stream, undecoded, as a standard can_msgs/Frame on can_frames.
 
-The frames come from openpilot's can service: all buses in one stream, in the order pandad read them from the panda.
-header.frame_id names the bus. CAN FD frames longer than 8 bytes don't fit a can_msgs/Frame, so they go to
-can_fd_frames as ros2_socketcan_msgs/FdFrame instead.
+The can stream holds the frames the Comma's panda receives and the frames it sends, from all buses, in the order
+pandad read them. header.frame_id names the bus. CAN FD frames longer than 8 bytes don't fit a can_msgs/Frame, so
+can_fd_frames carries every frame as a ros2_socketcan_msgs/FdFrame: the complete stream, in order, for CAN FD cars.
 """
 
 import math
@@ -28,8 +28,9 @@ except ImportError:
     FdFrame = None
 
 NODE_NAME = "openpilot_can_frame_publisher"
-# pandad adds these to the bus number in src for frames openpilot sent (CAN_RETURNED_BUS_OFFSET, the panda confirming
-# it put the frame on the bus) and for frames the panda's safety blocked (CAN_REJECTED_BUS_OFFSET, never on the bus)
+# pandad adds these to the bus number in src. Sent (CAN_RETURNED_BUS_OFFSET): a frame the panda sends on that bus,
+# openpilot's own or one it forwards between buses 0 and 2, reported when the panda queues it for sending.
+# Blocked (CAN_REJECTED_BUS_OFFSET): a frame from openpilot that the panda's safety checks kept off the bus.
 SENT_OFFSET = 0x80
 BLOCKED_OFFSET = 0xC0
 # Classic CAN data length; can_msgs/Frame always carries 8 data bytes, dlc says how many are used
@@ -58,21 +59,24 @@ class OpenPilotCanFramePublisher(Node):
         self.fd_frame_pub = self.create_publisher(FdFrame, 'can_fd_frames', qos) if FdFrame is not None else None
         if self.fd_frame_pub is None:
             self.get_logger().warning(
-                "ros2_socketcan_msgs is not installed, so CAN FD frames longer than 8 bytes are not published "
-                "(sudo apt install ros-$ROS_DISTRO-ros2-socketcan-msgs)"
+                "ros2_socketcan_msgs is not installed, so can_fd_frames is not published and CAN FD frames longer "
+                "than 8 bytes are left out (sudo apt install ros-$ROS_DISTRO-ros2-socketcan-msgs)"
             )
         # header.frame_id per pandad src, built on first use
         self.frame_ids = {}
+        self.last_invalid_warning = -math.inf
 
         topic_name = self.get_parameter("can_port").value
-        sock = messaging.sub_sock(topic_name)
-        self.get_logger().info(f"Subscribed to openpilot messaging topic: {topic_name}")
-        self.cereal_thread = threading.Thread(target=self.cereal_loop, args=(sock, topic_name), daemon=True)
+        self.cereal_thread = threading.Thread(target=self.cereal_loop, args=(topic_name,), daemon=True)
         self.cereal_thread.start()
 
         self.get_logger().info("OpenPilot CAN frame publisher is ready.")
 
-    def cereal_loop(self, sock, topic_name):
+    def cereal_loop(self, topic_name):
+        # Subscribed from the thread that reads: msgq wakes the thread that subscribed when a batch arrives, and any
+        # other thread only notices on its next 100 ms poll, so the batches would come in bursts
+        sock = messaging.sub_sock(topic_name)
+        self.get_logger().info(f"Subscribed to openpilot messaging topic: {topic_name}")
         last_error = -math.inf
         while rclpy.ok():
             # Everything inside the try, so a batch that doesn't convert drops only itself
@@ -81,55 +85,65 @@ class OpenPilotCanFramePublisher(Node):
                 if message:
                     self.process_can(message)
             except Exception as exc:
+                # Publishing fails once Ctrl+C has shut ROS down; that isn't worth an error
+                if not rclpy.ok():
+                    break
                 # At most one line every 5 s, so a stream of bad batches doesn't flood the log
                 if time.monotonic() - last_error > 5.0:
                     last_error = time.monotonic()
                     self.get_logger().error(f"Failed to process {topic_name}: {exc}")
 
     def process_can(self, message):
-        # Thousands of frames per second: build messages only while something subscribes
+        # Thousands of frames per second: build messages only for the topics something subscribes to
         publish_frames = self.frame_pub.get_subscription_count() > 0
         publish_fd_frames = self.fd_frame_pub is not None and self.fd_frame_pub.get_subscription_count() > 0
         if not (publish_frames or publish_fd_frames):
             return
+        # pandad marks a batch invalid when reading from the panda failed; the frames after the failure are lost
+        if not message.valid and time.monotonic() - self.last_invalid_warning > 5.0:
+            self.last_invalid_warning = time.monotonic()
+            self.get_logger().warning("openpilot lost CAN frames: pandad had an error reading them from the panda")
 
         # The frames of a batch carry no time of their own, so all get the time the batch arrived
         stamp = self.get_clock().now().to_msg()
         for can_data in message.can:
             dat = can_data.dat
-            if len(dat) <= CLASSIC_LEN:
-                if not publish_frames:
-                    continue
-                msg = Frame()
-                msg.dlc = len(dat)
-                # A numpy array of exactly 8 bytes; the generated setter doesn't take bytes
-                msg.data = np.frombuffer(dat.ljust(CLASSIC_LEN, b"\0"), dtype=np.uint8)
-                publisher = self.frame_pub
-            else:
-                if not publish_fd_frames:
-                    continue
-                msg = FdFrame()
-                msg.len = len(dat)
-                msg.data = dat
-                publisher = self.fd_frame_pub
-
+            address = can_data.address
             src = can_data.src
             frame_id = self.frame_ids.get(src)
             if frame_id is None:
                 frame_id = self.frame_ids[src] = frame_id_of(src)
-            msg.header.stamp = stamp
-            msg.header.frame_id = frame_id
-            msg.id = can_data.address
             # cereal has no extended flag; pandad sends every ID from 0x800 up as extended, so read them the same way
-            msg.is_extended = can_data.address >= 0x800
-            publisher.publish(msg)
+            is_extended = address >= 0x800
+
+            if publish_frames and len(dat) <= CLASSIC_LEN:
+                msg = Frame()
+                msg.header.stamp = stamp
+                msg.header.frame_id = frame_id
+                msg.id = address
+                msg.is_extended = is_extended
+                msg.dlc = len(dat)
+                # A numpy array of exactly 8 bytes; the generated setter doesn't take bytes
+                msg.data = np.frombuffer(dat.ljust(CLASSIC_LEN, b"\0"), dtype=np.uint8)
+                self.frame_pub.publish(msg)
+            if publish_fd_frames:
+                msg = FdFrame()
+                msg.header.stamp = stamp
+                msg.header.frame_id = frame_id
+                msg.id = address
+                msg.is_extended = is_extended
+                msg.len = len(dat)
+                msg.data = dat
+                self.fd_frame_pub.publish(msg)
 
 
 def main(args=None):
     rclpy.init(args=args)
     if Frame is None:
         rclpy.logging.get_logger(NODE_NAME).fatal(
-            "can_msgs is not installed (sudo apt install ros-$ROS_DISTRO-can-msgs); not publishing CAN frames"
+            "can_msgs is not installed, so no CAN frames are published. Install it with "
+            "sudo apt install ros-$ROS_DISTRO-can-msgs; with the Docker version, use an image built from this "
+            "checkout (image_name:=openpilot_ros2_bridge:local image_source:=build)"
         )
         rclpy.try_shutdown()
         return 1

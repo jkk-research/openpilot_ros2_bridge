@@ -46,7 +46,7 @@ Everything is published as typed ROS 2 messages that mirror openpilot's own (see
 
 - typed ROS 2 messages that mirror openpilot's own, one topic per openpilot service: `carState`, `carControl`, `carOutput`, `carParams`, `modelV2`, `longitudinalPlan`, `lateralPlan` (older openpilot), `driverStateV2`, `driverMonitoringState` and `extrinsicsCalibration` (see [Typed messages](#typed-messages))
 - drivetrain CAN messages (engine RPM, pedal positions, brake force, gear and more), decoded with opendbc and published as typed `CanMessage`s (see [Drivetrain](#drivetrain))
-- every raw CAN frame the Comma receives, undecoded, as standard `can_msgs/Frame` messages (see [Raw CAN frames](#raw-can-frames))
+- every raw CAN frame the Comma's panda receives or sends, undecoded, as standard `can_msgs/Frame` messages (see [Raw CAN frames](#raw-can-frames))
 - optional radar data: openpilot's `radarState` and `radarTracks`, and the radar's own CAN messages decoded with opendbc (see [Radar](#radar))
 - RViz marker topics for plan, lane lines, road edges, and leads
 - TF frames for openpilot's calibrated frame and the Comma device, driven by openpilot calibration
@@ -278,7 +278,7 @@ The drivetrain node is on by default (`start_drivetrain:=true`).
 It decodes the car's drivetrain CAN messages and publishes every frame as a typed `CanMessage` on `/openpilot/can` (see below).
 The car's state, what openpilot sent to it and the car's parameters are in the typed `carState`, `carOutput` and `carParams` topics.
 The node reads `carParams` and the raw `can` stream through the local bridge, so keep both in `bridge_topics` if you override it.
-If you turn the node off together with the raw CAN frames (`start_can_frames:=false`, see [Raw CAN frames](#raw-can-frames)), you can drop `can` from `bridge_topics`: it is the largest stream, 100 batches per second and about 100 kB/s on a Lexus RX.
+If you turn the node off, and the raw CAN frames (`start_can_frames:=false`, see [Raw CAN frames](#raw-can-frames)) and `start_radar_can` are off too, you can drop `can` from `bridge_topics`: it is the largest stream, 100 batches per second and about 100 kB/s on a Lexus RX.
 
 ### Array topics
 
@@ -348,34 +348,41 @@ Useful arguments:
 ## Raw CAN frames
 
 The raw CAN frame node is on by default (`start_can_frames:=true`).
-It publishes every CAN frame the Comma receives, undecoded, as a standard [`can_msgs/Frame`](https://github.com/ros-industrial/ros_canopen/blob/dashing-devel/can_msgs/msg/Frame.msg) on `/openpilot/can_frames`.
-That is one message per frame, from all buses in one stream, in the order openpilot received them.
-The node reads the raw `can` stream through the local bridge, so keep `can` in `bridge_topics` if you override it.
+It publishes every frame of openpilot's raw `can` stream, undecoded, as a standard [`can_msgs/Frame`](https://github.com/ros-industrial/ros_canopen/blob/dashing-devel/can_msgs/msg/Frame.msg) on `/openpilot/can_frames`: the frames the Comma's panda receives, and the ones it sends.
+That is one message per frame, from all buses in one stream, in the order openpilot read them.
+The node reads the `can` stream through the local bridge, so keep `can` in `bridge_topics` if you override it.
 For decoded signals instead, see `can` under [Drivetrain](#drivetrain) and `radar_can` under [Radar](#radar).
 
 | Field | Contents |
 | --- | --- |
 | `header.stamp` | When the frame's batch arrived. openpilot sends the frames in batches, 100 per second, without a time per frame, so all frames of a batch get the same stamp. |
-| `header.frame_id` | The CAN bus the frame is on, as openpilot numbers it: `can0`, `can1` or `can2` for frames from the car. `can0_sent` to `can2_sent` are frames openpilot sent, once the panda has put them on the bus. `can0_blocked` to `can2_blocked` are frames openpilot tried to send that the panda's safety checks blocked, so they never reached the bus. |
+| `header.frame_id` | The CAN bus, as openpilot numbers it. `can0`, `can1` and `can2` are frames the panda received on that bus. `can0_sent` to `can2_sent` are frames the panda sent on that bus: openpilot's own, and the ones it passes on between bus 0 and bus 2 (see below). The panda reports them when it queues them for sending, not once they are on the bus. `can0_blocked` to `can2_blocked` are frames from openpilot that the panda's safety checks blocked, so they never reached the bus. |
 | `id` | The CAN ID. |
 | `is_extended` | True for IDs from 0x800 up. openpilot doesn't pass on whether a frame used an extended ID, so a 29-bit ID below 0x800 reads as a standard one; openpilot itself sends frames the same way. |
 | `dlc` | The number of data bytes, 0 to 8. |
 | `data` | The data bytes, padded with zeros to 8. |
-| `is_rtr`, `is_error` | Always false: openpilot doesn't pass on remote or error frames. |
+| `is_rtr`, `is_error` | Always false. openpilot doesn't say whether a frame was a remote frame, so one shows up as a data frame whose bytes mean nothing, and error frames don't reach it. |
 
-Which bus carries what depends on the car and its harness. Usually bus 0 is the car side of the harness and bus 2 the side of the car's own camera; on the Lexus RX, the radar is on bus 1 (see [Radar](#radar)).
+Which bus carries what depends on the car and its harness.
+Usually the harness sits between the car and its own camera: bus 0 is the car side, bus 2 the camera side, and the panda passes the frames on between the two, except the ones openpilot sends in their place.
+So `can0` and `can0_sent` together are everything on the car side, and a frame passed on shows up twice: as `can2` when the camera sends it, and as `can0_sent` when the panda passes it to the car.
+On the Lexus RX, the radar is on bus 1 (see [Radar](#radar)).
+On openpilot 0.10.3 and older with a second panda, such as a red panda on a comma three, that panda's buses are numbered from 4: `can4` to `can6`, with matching `_sent` and `_blocked` names.
 
-CAN FD frames longer than 8 bytes, which Hyundai, Kia and Genesis CAN-FD cars among others send, don't fit a `can_msgs/Frame`.
-They go to `/openpilot/can_fd_frames` instead, as [`ros2_socketcan_msgs/FdFrame`](https://github.com/autowarefoundation/ros2_socketcan/blob/main/ros2_socketcan_msgs/msg/FdFrame.msg): the same `header`, `id` and `is_extended`, with `len` (12 to 64) and `data`.
-CAN FD frames of 8 bytes or less are on `can_frames`, because openpilot doesn't say which frames are CAN FD. On a CAN FD car, subscribe to both topics to get every frame.
+CAN FD frames longer than 8 bytes, which Hyundai, Kia and Genesis CAN-FD cars among others send, don't fit a `can_msgs/Frame` and are left out of `can_frames`.
+For CAN FD cars, `/openpilot/can_fd_frames` carries every frame, of any length, as a [`ros2_socketcan_msgs/FdFrame`](https://github.com/autowarefoundation/ros2_socketcan/blob/main/ros2_socketcan_msgs/msg/FdFrame.msg), the type ros2_socketcan uses for CAN FD: the same `header`, `id` and `is_extended`, with `len` and `len` bytes of `data`.
+It is the complete stream in order, so on a CAN FD car, subscribe to it instead of `can_frames`.
 
-Every frame is its own message, a few thousand per second (about 4,000 on a Lexus RX, judging by the size of its `can` stream), so the node needs a noticeable share of a CPU core while something subscribes. While nothing subscribes, it does no work.
+Every frame is its own message, a few thousand per second (about 4,000 on a Lexus RX, judging by the size of its `can` stream), so the node needs a noticeable share of a CPU core while something subscribes to one of its topics. While nothing does, it does no work.
+Each batch arrives as a burst of dozens of messages, so a subscriber needs a deep queue, about 1000, or it loses frames without notice; `ros2 topic echo` keeps only 5 by default. `ros2 bag record` keeps up.
+When pandad loses frames reading them from the panda, the node logs a warning; those frames are missing from the topics too.
 
 To receive the frames, a host needs the two message packages, which ROS 2 Humble and Jazzy have; the Docker image already includes them:
 
 ```bash
 sudo apt install ros-$ROS_DISTRO-can-msgs ros-$ROS_DISTRO-ros2-socketcan-msgs
-ros2 topic echo /openpilot/can_frames --once
+ros2 topic echo --qos-depth 1000 /openpilot/can_frames
+ros2 bag record /openpilot/can_frames
 ```
 
 ## Radar

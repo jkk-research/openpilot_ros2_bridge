@@ -50,13 +50,13 @@ source install/setup.bash
 
 Rebuild it after every `git pull` of this repository. The launch pulls the newest image, which follows `main`, and with different message definitions on the two sides your nodes read wrong values without any error. The launch compares your build in `~/ros2_ws` (or the one your shell has sourced) with the image and prints a warning when they differ.
 
-The raw CAN frames on `/openpilot/can_frames` use the standard `can_msgs/Frame` type instead (see [Raw CAN frames](README.md#raw-can-frames)). To receive them on the host, install that once, with the CAN FD type next to it:
+After that, `ros2 launch openpilot_ros2_bridge openpilot_bridge_docker.launch.py ...` with the same arguments works too.
+
+The raw CAN frames on `/openpilot/can_frames` don't use this package's types but the standard `can_msgs/Frame` (see [Raw CAN frames](README.md#raw-can-frames)). To receive them on the host, install it once, with the CAN FD type next to it:
 
 ```bash
 sudo apt install ros-humble-can-msgs ros-humble-ros2-socketcan-msgs
 ```
-
-After that, `ros2 launch openpilot_ros2_bridge openpilot_bridge_docker.launch.py ...` with the same arguments works too.
 
 The launch file does the following, and does each step only when it's needed:
 
@@ -95,7 +95,7 @@ Other useful arguments:
 | `start_radar_can:=true` | Publishes the radar's own CAN messages and the blind spot monitor's messages, decoded with opendbc, on `/openpilot/radar_can`. |
 | `publish_arrays:=true` | Also publishes the older `Float32MultiArray` topics (`car_state_*`, `driver_*`, `drivetrain_*` and more). |
 | `start_control:=true` | Lets ROS 2 drive the car through openpilot's joystick mode, from `/openpilot/joystick_command`. See [Drive the car from ROS 2](#4-drive-the-car-from-ros-2-optional). |
-| `mount_source:=true` | Runs this repository's scripts and launch files instead of the copies in the image, for testing local changes. Changes to the message definitions (`msg/`) need `image_name:=openpilot_ros2_bridge:local image_source:=build` instead. |
+| `mount_source:=true` | Runs this repository's scripts and launch files instead of the copies in the image, for testing local changes. Changes to the message definitions (`msg/`), `docker/Dockerfile` or `requirements.txt` need `image_name:=openpilot_ros2_bridge:local image_source:=build` instead. |
 
 ## 3. Check it
 
@@ -118,7 +118,7 @@ Expected rates:
 | `extrinsicsCalibration` (`liveCalibration` on older openpilot) | ~4 Hz |
 | `carParams` | every 50 s, latched |
 | `can` | every decoded drivetrain frame, about 280 per second on a Lexus RX, starting after the first `carParams` (up to 50 s) |
-| `can_frames` | every raw CAN frame of all buses, a few thousand per second; `can_fd_frames` only on CAN FD cars |
+| `can_frames`, `can_fd_frames` | every raw CAN frame of all buses, a few thousand per second; `can_frames` leaves out CAN FD frames longer than 8 bytes |
 | `radarState`, `radarTracks` (with `start_radar:=true`) | ~20 Hz |
 | `radar_can` (with `start_radar_can:=true`) | every decoded radar frame, about 630 per second on a Lexus RX, starting after the first `carParams` (up to 50 s) |
 | `*_camera/image_raw*` (with `start_camera:=true`) | ~20 Hz while onroad |

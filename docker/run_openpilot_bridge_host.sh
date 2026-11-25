@@ -110,6 +110,15 @@ if [[ "${MOUNT_SOURCE}" == "true" ]]; then
       "Build the image from this checkout instead: image_name:=openpilot_ros2_bridge:local image_source:=build" >&2
     exit 1
   fi
+  # Nor does it install the packages this checkout's image would have; the image holds a copy of the files that list them
+  IMAGE_BUILD_DIGESTS="$(docker run --rm --network none --entrypoint sh "${IMAGE_NAME}" -c \
+    'cd /workspace/ros2_ws/src/openpilot_ros2_bridge && sha256sum -- docker/Dockerfile requirements.txt' 2>/dev/null || true)"
+  if [[ "$(cd "${REPO_ROOT}" && sha256sum -- docker/Dockerfile requirements.txt 2>/dev/null)" != "${IMAGE_BUILD_DIGESTS}" ]]; then
+    echo "Warning: ${IMAGE_NAME} was built from a different docker/Dockerfile or requirements.txt than ${REPO_ROOT}," \
+      "and mount_source:=true doesn't install what this checkout adds there, so nodes that need it fail" \
+      "(the raw CAN frames need the can_msgs package, for example)." \
+      "To get it, build the image from this checkout: image_name:=openpilot_ros2_bridge:local image_source:=build" >&2
+  fi
 fi
 
 HOST_PACKAGE_PREFIX="$(host_package_prefix)"
