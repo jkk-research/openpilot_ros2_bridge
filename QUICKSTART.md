@@ -87,7 +87,7 @@ Other useful arguments:
 | `remote_bridge_target:=comma@<ip>` | SSH user and host. Defaults to `comma@<comma_ip>`. |
 | `cyclonedds_uri:=file:///path.xml` | Overrides `CYCLONEDDS_URI`. |
 | `start_tf:=false` | Turns off the TF frames. |
-| `start_camera:=true cameras:=road,wide_road,driver` | Streams the cameras to `/openpilot/<camera>_camera/image_raw` and `.../compressed`. |
+| `start_camera:=true cameras:=road,wide_road,driver` | Streams the cameras to `/openpilot/<camera>_camera/image_raw` and `.../compressed`, with each camera's calibration on `.../camera_info`. |
 | `start_driver_monitoring:=false` | Turns off the driver monitoring topics. |
 | `start_drivetrain:=false` | Turns off the decoded CAN messages on `/openpilot/can`. |
 | `start_can_frames:=false` | Turns off the raw CAN frames on `/openpilot/can_frames` and `/openpilot/can_fd_frames`. |
@@ -121,7 +121,7 @@ Expected rates:
 | `can_frames`, `can_fd_frames` | every raw CAN frame of all buses, a few thousand per second; `can_frames` leaves out CAN FD frames longer than 8 bytes |
 | `radarState`, `radarTracks` (with `start_radar:=true`) | ~20 Hz |
 | `radar_can` (with `start_radar_can:=true`) | every decoded radar frame, about 630 per second on a Lexus RX, starting after the first `carParams` (up to 50 s) |
-| `*_camera/image_raw*` (with `start_camera:=true`) | ~20 Hz while onroad |
+| `*_camera/image_raw*`, `*_camera/camera_info` (with `start_camera:=true`) | ~20 Hz while onroad |
 | `lateralPlan` | only on older openpilot versions that still publish it |
 
 The topics show up in `ros2 topic list`, but the driver's nodes won't appear in `ros2 node list` from a Humble host. That's expected: the container runs Jazzy, and Humble can't decode its node info.

@@ -50,7 +50,7 @@ Everything is published as typed ROS 2 messages that mirror openpilot's own (see
 - optional radar data: openpilot's `radarState` and `radarTracks`, and the radar's own CAN messages decoded with opendbc (see [Radar](#radar))
 - RViz marker topics for plan, lane lines, road edges, and leads
 - TF frames for openpilot's calibrated frame and the Comma device, driven by openpilot calibration
-- optional road, wide road, and driver camera streams as raw and JPEG-compressed images
+- optional road, wide road, and driver camera streams as raw and JPEG-compressed images, each with its camera calibration
 - optional, with `publish_arrays:=true`: the older `Float32MultiArray` topics for the model, plans, car state and control, driver monitoring and drivetrain
 
 All topics are published under the `openpilot` namespace (for example `/openpilot/carState`). Change it with `namespace:=<name>`.
@@ -221,6 +221,7 @@ It decodes the video with PyAV and publishes:
 
 - `/openpilot/<camera>_camera/image_raw` (`sensor_msgs/Image`, `bgr8`)
 - `/openpilot/<camera>_camera/image_raw/compressed` (`sensor_msgs/CompressedImage`, JPEG)
+- `/openpilot/<camera>_camera/camera_info` (`sensor_msgs/CameraInfo`, the camera's calibration; see [Camera calibration](#camera-calibration))
 
 | `cameras` entry | openpilot stream | Video |
 | --- | --- | --- |
@@ -245,6 +246,25 @@ Notes:
 - A node always decodes its stream, but only converts and compresses images while something subscribes to that topic.
 - Over a weak Wi-Fi link, stream fewer cameras or use `q_road`.
 - If you created the bridge venv before camera support was added, rerun `./scripts/setup_bridge_venv.sh` to install PyAV.
+
+### Camera calibration
+
+Each camera node also publishes `camera_info` with every image: the same stamp, the same `frame_id` (`openpilot_<camera>_camera`), and the size of the published image, so `camera_scale` is taken into account.
+That is what `image_proc`, RViz's Camera display and other `image_transport` subscribers pair with the images.
+
+The intrinsics are openpilot's own, the ones its driving model and its UI use (`DEVICE_CAMERAS` in openpilot's `common/transformations/camera.py`):
+
+| Image sensor | Full frame | Road camera focal length | Wide road and driver camera focal length |
+| --- | --- | --- | --- |
+| AR0231, OX03C10 (Comma 3, 3X) | 1928x1208 | 2648 px | 567 px |
+| OS04C10 | 1344x760 | 1141.5 px | 425.25 px |
+
+- `k` and `p` hold that focal length and the image center as the principal point, scaled from the full frame to the published size. `r` is the identity.
+- openpilot has no distortion model and treats every camera as a pinhole camera, so `distortion_model` is `plumb_bob` with five zeros in `d`.
+  That suits the road camera. The wide road and driver cameras have fisheye lenses, so for them the intrinsics only hold near the image center; openpilot's own source notes that their focal length is probably off. For accurate work with those two, calibrate them yourself, for example with the `camera_calibration` package.
+- The road, wide road and driver nodes tell the sensor from the size of their full resolution frames.
+  `q_road` is a 526x330 copy of the road camera whose size doesn't say which sensor took it, so that node reads the road camera's sensor from openpilot's `narrowRoadCameraState` (`roadCameraState` on older openpilot), through the same bridge connection. Until that arrives, or with a frame size or sensor it doesn't know, a node publishes no `camera_info` and logs why.
+- The `openpilot_<camera>_camera` frames are not in TF, so place them yourself if you need the images in 3D, for example in RViz.
 
 ## Driver monitoring
 
