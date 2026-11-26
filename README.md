@@ -254,17 +254,22 @@ That is what `image_proc`, RViz's Camera display and other `image_transport` sub
 
 The intrinsics are openpilot's own, the ones its driving model and its UI use (`DEVICE_CAMERAS` in openpilot's `common/transformations/camera.py`):
 
-| Image sensor | Full frame | Road camera focal length | Wide road and driver camera focal length |
+| Image sensor | Full resolution stream | Road camera focal length | Wide road and driver camera focal length |
 | --- | --- | --- | --- |
-| AR0231, OX03C10 (Comma 3, 3X) | 1928x1208 | 2648 px | 567 px |
-| OS04C10 | 1344x760 | 1141.5 px | 425.25 px |
+| AR0231, OX03C10 | 1928x1208 | 2648 px | 567 px |
+| OS04C10 | 1344x760, binned from 2688x1520 | 1141.5 px | 425.25 px |
+
+Each node logs which sensor's intrinsics it uses. The OS04C10 values hold from openpilot 0.9.8 on; before that, openpilot ran that sensor in other modes, so its full resolution streams get no `camera_info` there and `q_road`'s is off.
 
 - `k` and `p` hold that focal length and the image center as the principal point, scaled from the full frame to the published size. `r` is the identity.
 - openpilot has no distortion model and treats every camera as a pinhole camera, so `distortion_model` is `plumb_bob` with five zeros in `d`.
-  That suits the road camera. The wide road and driver cameras have fisheye lenses, so for them the intrinsics only hold near the image center; openpilot's own source notes that their focal length is probably off. For accurate work with those two, calibrate them yourself, for example with the `camera_calibration` package.
+  That suits the road camera. The wide road and driver cameras have fisheye lenses, so for them the intrinsics only hold near the image center; openpilot's own source notes that their focal length is probably off.
+  For accurate work with those two, calibrate them yourself, for example with `ros2 run camera_calibration cameracalibrator --no-service-check` on their `image_raw`, and save the result. The node can't store a calibration and keeps publishing openpilot's intrinsics on `camera_info`, so publish yours on another topic.
 - The road, wide road and driver nodes tell the sensor from the size of their full resolution frames.
   `q_road` is a 526x330 copy of the road camera whose size doesn't say which sensor took it, so that node reads the road camera's sensor from openpilot's `narrowRoadCameraState` (`roadCameraState` on older openpilot), through the same bridge connection. Until that arrives, or with a frame size or sensor it doesn't know, a node publishes no `camera_info` and logs why.
 - The `openpilot_<camera>_camera` frames are not in TF, so place them yourself if you need the images in 3D, for example in RViz.
+  They are optical frames, as `CameraInfo` expects (x right, y down, z forward), so they need a rotation from the forward-right-down `openpilot_device` frame. For the road camera, which openpilot puts at the device's origin, that is openpilot's own `device_frame_from_view_frame`:
+  `ros2 run tf2_ros static_transform_publisher --frame-id openpilot_device --child-frame-id openpilot_road_camera --qx 0.5 --qy 0.5 --qz 0.5 --qw 0.5`. The driver camera faces the cabin and needs its own rotation.
 
 ## Driver monitoring
 

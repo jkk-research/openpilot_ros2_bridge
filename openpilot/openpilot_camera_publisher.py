@@ -26,8 +26,9 @@ CAMERA_SERVICES = {
 ROAD_CAMERA_STATE_SERVICES = ("narrowRoadCameraState", "roadCameraState")
 
 # openpilot's camera intrinsics for the Comma 3, 3X and 4 (DEVICE_CAMERAS in common/transformations/camera.py): the
-# full frame the sensor delivers, and the focal length in pixels of the road camera and of the fisheye lens the wide
-# road and driver cameras share. openpilot has no distortion model; it treats every camera as a pinhole camera.
+# size of the full resolution streams (camerad bins OS04C10 frames to half size; that holds from openpilot 0.9.8),
+# and the focal length in pixels of the road camera and of the fisheye lens the wide road and driver cameras share.
+# openpilot has no distortion model; it treats every camera as a pinhole camera.
 SENSOR_CAMERAS = {
     "ar0231/ox03c10": {"size": (1928, 1208), "road": 2648.0, "fisheye": 567.0},
     "os04c10": {"size": (1344, 760), "road": 1522.0 * 3 / 4, "fisheye": 567.0 / 4 * 3},
@@ -128,7 +129,12 @@ class OpenPilotCameraPublisher(Node):
         # Same field number under both names, so the bundled schema reads the newer name as the older one
         if message.which() not in ROAD_CAMERA_STATE_SERVICES:
             return
-        sensor = str(getattr(message, message.which()).sensor)
+        field = getattr(message, message.which()).sensor
+        try:
+            sensor = str(field)
+        except RuntimeError:
+            # A sensor newer than the bundled schema has no name here
+            sensor = f"unknown sensor #{field.raw}"
         if sensor != self.road_sensor:
             self.road_sensor = sensor
             self.get_logger().info(f"Road camera sensor: {sensor}")
@@ -144,7 +150,7 @@ class OpenPilotCameraPublisher(Node):
         if model is None:
             note = (f"No camera_info for the {self.camera} camera yet: its {frame_width}x{frame_height} frames don't "
                     + ("tell the sensor, and the road camera state hasn't named one it knows"
-                       if self.camera == "q_road" else "match a sensor whose intrinsics openpilot gives"))
+                       if self.camera == "q_road" else "match a stream size the bridge has openpilot's intrinsics for"))
             if note != self.camera_model_note:
                 self.camera_model_note = note
                 self.get_logger().warning(note)

@@ -87,7 +87,7 @@ Other useful arguments:
 | `remote_bridge_target:=comma@<ip>` | SSH user and host. Defaults to `comma@<comma_ip>`. |
 | `cyclonedds_uri:=file:///path.xml` | Overrides `CYCLONEDDS_URI`. |
 | `start_tf:=false` | Turns off the TF frames. |
-| `start_camera:=true cameras:=road,wide_road,driver` | Streams the cameras to `/openpilot/<camera>_camera/image_raw` and `.../compressed`, with each camera's calibration on `.../camera_info`. |
+| `start_camera:=true cameras:=road,wide_road,driver` | Streams the cameras to `/openpilot/<camera>_camera/image_raw` and `.../compressed`, with each camera's calibration on `/openpilot/<camera>_camera/camera_info`. |
 | `start_driver_monitoring:=false` | Turns off the driver monitoring topics. |
 | `start_drivetrain:=false` | Turns off the decoded CAN messages on `/openpilot/can`. |
 | `start_can_frames:=false` | Turns off the raw CAN frames on `/openpilot/can_frames` and `/openpilot/can_fd_frames`. |
