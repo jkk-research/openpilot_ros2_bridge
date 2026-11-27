@@ -256,20 +256,32 @@ def main():
     # Newer openpilot keeps its packages under <dir>/openpilot; older versions import openpilot.* through a symlink
     sys.path[:0] = [args.openpilot_dir, os.path.join(args.openpilot_dir, 'msgq_repo'),
                     os.path.join(args.openpilot_dir, 'opendbc_repo')]
-    try:
+    failed = False
+    while True:
         try:
-            from openpilot.cereal import messaging
-        except ModuleNotFoundError as exc:
-            # openpilot before 0.11.2 keeps cereal at the top; anything else missing is a real error, reported below
-            if exc.name not in ('openpilot', 'openpilot.cereal'):
-                raise
-            import cereal.messaging as messaging
-        from openpilot.common.params import Params
-    except Exception as exc:
-        if not isinstance(exc, ModuleNotFoundError):
-            traceback.print_exc()
-        give_up(f"Can't load openpilot's libraries from {args.openpilot_dir} ({exc}): is openpilot there, and built?",
-                args.wait_on_error)
+            try:
+                from openpilot.cereal import messaging
+            except ModuleNotFoundError as exc:
+                # openpilot before 0.11.2 keeps cereal at the top; anything else missing is a real error, reported below
+                if exc.name not in ('openpilot', 'openpilot.cereal'):
+                    raise
+                import cereal.messaging as messaging
+            from openpilot.common.params import Params
+            break
+        except Exception as exc:
+            if not failed and not isinstance(exc, ModuleNotFoundError):
+                traceback.print_exc()
+            message = f"Can't load openpilot's libraries from {args.openpilot_dir} ({exc}): is openpilot there, and built?"
+            if not args.wait_on_error:
+                say(message)
+                sys.exit(3)
+            # It may still be getting built (right after a boot on a source branch): try again by itself
+            if not failed:
+                say(f"{message} Trying again every 10 s")
+                failed = True
+            time.sleep(10)
+    if failed:
+        say("Loaded openpilot's libraries")
     # A msgq built for another openpilot version would crash joystickd, so only the Comma's own will do
     msgq = sys.modules.get('msgq')
     if msgq is not None and not os.path.realpath(msgq.__file__).startswith(os.path.realpath(args.openpilot_dir) + os.sep):

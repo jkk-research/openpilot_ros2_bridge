@@ -131,9 +131,60 @@ fi
 
 # Check out the Comma's openpilot commit, when it isn't already: the nodes decode its messages with that version's
 # schema, service list and opendbc. Nothing in it has to be built.
+OPENPILOT_SUBMODULES=(opendbc_repo opendbc cereal)  # cereal was a submodule in old openpilot
+
+# Switches the checkout to the commit fetched from url; fails, leaving the checkout as it was, when it can't
+switch_checkout() {
+  local url="$1" commit="$2" path mode
+  local -a removed=()
+  echo "Checking out openpilot ${commit:0:8} from ${url} to match the Comma"
+  git -C "${HOST_OPENPILOT_ROOT}" fetch -q --depth 1 "${url}" "${commit}" || return 1
+  for path in "${OPENPILOT_SUBMODULES[@]}"; do
+    mode="$(git -C "${HOST_OPENPILOT_ROOT}" ls-tree FETCH_HEAD -- "${path}" | cut -d' ' -f1)"
+    if [[ -e "${HOST_OPENPILOT_ROOT}/${path}/.git" && "${mode}" != 160000 ]]; then
+      # A submodule that the commit has as a plain directory (release branches have no submodules) would block it
+      git -C "${HOST_OPENPILOT_ROOT}" submodule deinit -q -f -- "${path}" && removed+=("${path}")
+    elif [[ "${mode}" == 160000 && -d "${HOST_OPENPILOT_ROOT}/${path}" && ! -e "${HOST_OPENPILOT_ROOT}/${path}/.git" ]]; then
+      # A plain directory that becomes a submodule: the checkout leaves the ignored files in it (bytecode the nodes
+      # wrote), which would keep the submodule from being checked out. Only git can clear them now, while it's tracked.
+      git -C "${HOST_OPENPILOT_ROOT}" clean -q -ffdX -- "${path}" || true
+    fi
+  done
+  if ! git -C "${HOST_OPENPILOT_ROOT}" checkout -q --detach FETCH_HEAD; then
+    (( ${#removed[@]} )) && git -C "${HOST_OPENPILOT_ROOT}" submodule update -q --init -- "${removed[@]}"
+    return 1
+  fi
+}
+
+# Checks out the submodules the nodes need. After a switch all of them; otherwise only the ones not checked out at
+# all, since one on another commit was moved by hand (the dirty check counts that as a local change too).
+update_submodules() {
+  local commit="$1" switched="$2" path status
+  local -a submodules=() missing=()
+  for path in "${OPENPILOT_SUBMODULES[@]}"; do
+    if git -C "${HOST_OPENPILOT_ROOT}" config -f .gitmodules --get-regexp '^submodule\..*\.path$' 2>/dev/null |
+        awk '{print $2}' | grep -qxF "${path}"; then
+      submodules+=("${path}")
+    fi
+  done
+  (( ${#submodules[@]} )) || return 0
+  status="$(git -C "${HOST_OPENPILOT_ROOT}" submodule status -- "${submodules[@]}" 2>/dev/null || true)"
+  if [[ "${switched}" == true ]]; then
+    missing=("${submodules[@]}")
+  else
+    mapfile -t missing < <(awk '/^-/ {print $2}' <<<"${status}")
+    for path in $(awk '/^[+U]/ {print $2}' <<<"${status}"); do
+      echo "${HOST_OPENPILOT_ROOT}/${path} isn't on the commit openpilot ${commit:0:8} expects; leaving it as it is" >&2
+    done
+  fi
+  (( ${#missing[@]} )) || return 0
+  echo "Checking out ${missing[*]} in ${HOST_OPENPILOT_ROOT}"
+  git -C "${HOST_OPENPILOT_ROOT}" submodule update -q --init --depth 1 -- "${missing[@]}" ||
+    echo "Could not check out ${missing[*]} in ${HOST_OPENPILOT_ROOT}" >&2
+}
+
 prepare_openpilot() {
-  local info="" url commit current path
-  local -a submodules=()
+  local info="" url commit current switched=false
 
   if [[ -n "${COMMA_TARGET}" ]]; then
     info="$(ssh -o BatchMode=yes -o ConnectTimeout=5 "${COMMA_TARGET}" \
@@ -163,28 +214,16 @@ prepare_openpilot() {
     elif [[ -n "${current}" && -n "$(git -C "${HOST_OPENPILOT_ROOT}" status --porcelain --untracked-files=no \
         -- . ':(exclude,attr:filter=lfs)')" ]]; then
       echo "${HOST_OPENPILOT_ROOT} has local changes; not switching it to the Comma's commit ${commit:0:8}" >&2
-    else
-      echo "Checking out openpilot ${commit:0:8} from ${url} to match the Comma"
-      git -C "${HOST_OPENPILOT_ROOT}" fetch -q --depth 1 "${url}" "${commit}"
-      git -C "${HOST_OPENPILOT_ROOT}" checkout -q --detach FETCH_HEAD
+    elif switch_checkout "${url}" "${commit}"; then
       current="${commit}"
+      switched=true
+    else
+      echo "Could not switch ${HOST_OPENPILOT_ROOT} to the Comma's commit ${commit:0:8}; using it as it is" >&2
     fi
 
-    # opendbc, and cereal where it was a submodule (old openpilot); checked every time, in case an earlier launch
-    # stopped before they were checked out
+    # Every time, in case an earlier launch stopped before the submodules were checked out
     if [[ "${current}" == "${commit}" ]]; then
-      for path in opendbc_repo opendbc cereal; do
-        if git -C "${HOST_OPENPILOT_ROOT}" config -f .gitmodules --get-regexp '^submodule\..*\.path$' 2>/dev/null |
-            awk '{print $2}' | grep -qxF "${path}"; then
-          submodules+=("${path}")
-        fi
-      done
-      if (( ${#submodules[@]} )) && [[ -n "$(git -C "${HOST_OPENPILOT_ROOT}" submodule status -- "${submodules[@]}" |
-          grep '^[-+U]' || true)" ]]; then
-        echo "Checking out ${submodules[*]} in ${HOST_OPENPILOT_ROOT}"
-        git -C "${HOST_OPENPILOT_ROOT}" submodule update -q --init --depth 1 "${submodules[@]}" ||
-          echo "Could not check out ${submodules[*]} in ${HOST_OPENPILOT_ROOT}" >&2
-      fi
+      update_submodules "${commit}" "${switched}"
     fi
   fi
 
@@ -200,10 +239,12 @@ elif [[ ! -d "${HOST_OPENPILOT_ROOT}/openpilot" ]]; then
   echo "Missing openpilot source tree under ${HOST_OPENPILOT_ROOT}/openpilot" >&2
   exit 1
 fi
-# Every message definition imports opendbc's car.capnp, so none of the nodes could start without it
-if [[ -d "${HOST_OPENPILOT_ROOT}/opendbc_repo" && -z "$(ls -A "${HOST_OPENPILOT_ROOT}/opendbc_repo")" ]]; then
-  echo "${HOST_OPENPILOT_ROOT}/opendbc_repo is empty: check it out with" \
-    "'git -C ${HOST_OPENPILOT_ROOT} submodule update --init opendbc_repo', or use prepare_openpilot:=true" >&2
+# Every message definition imports car.capnp, which comes from opendbc since openpilot 0.10 (before, cereal had it)
+if [[ -d "${HOST_OPENPILOT_ROOT}/opendbc_repo" && ! -f "${HOST_OPENPILOT_ROOT}/opendbc_repo/opendbc/car/car.capnp" ]] &&
+    ! [[ -f "${HOST_OPENPILOT_ROOT}/cereal/car.capnp" && ! -L "${HOST_OPENPILOT_ROOT}/cereal/car.capnp" ]]; then
+  echo "opendbc is missing from ${HOST_OPENPILOT_ROOT}/opendbc_repo, and none of the nodes can start without it." \
+    "Check it out with 'git -C ${HOST_OPENPILOT_ROOT} submodule update --init opendbc_repo'" \
+    "(if that fails, empty the directory first)." >&2
   exit 1
 fi
 

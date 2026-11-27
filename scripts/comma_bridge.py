@@ -27,19 +27,24 @@ import sys
 import time
 import traceback
 
-PIDFILE = '/tmp/openpilot_ros2_comma_bridge.pid'
-LOCKFILE = '/tmp/openpilot_ros2_comma_bridge.lock'  # held while one that starts decides whether to run or to share
-# Its pid, how many PCs it serves and when it wrote this, rewritten every second, so the next one started can tell a
-# working instance (share it) from one that hangs (replace it)
-STATUSFILE = '/tmp/openpilot_ros2_comma_bridge.status'
-STALE_AFTER = 5.0  # s without a change of its status after which the running instance counts as hung
+# One set per user, so files left by a run as another user (root) can't get in the way
+FILES = f'/tmp/openpilot_ros2_comma_bridge_{os.getuid()}'
+PIDFILE = FILES + '.pid'
+LOCKFILE = FILES + '.lock'  # held while one that starts decides whether to run or to share
+# Its pid, how many PCs it serves and when it wrote this, rewritten in place every second (so a full /tmp can't stop
+# it), so the next one started can tell a working instance (share it) from one that hangs (replace it)
+STATUSFILE = FILES + '.status'
+STALE_AFTER = 5.0  # s without a change of its status or CPU time after which the running instance counts as hung
 POLL_TIMEOUT = 10  # ms the loop waits for openpilot's messages before it looks at the network anyway
 WRITE_WAIT = 0.002  # s the loop waits for sockets, while one has data to send, before it reads the services anyway
 REPORT_PERIOD = 1.0  # s over which connects and disconnects are gathered into one line
 SLOT_CHECK_PERIOD = 0.1  # s between looks at the msgq queue of each service it reads
-# Readers keep evicting each other when msgq clears a queue's slots twice within 1 s, or three times within 5 s; a
-# publisher that restarts clears them once
-STORM = ((2, 1.0), (3, 5.0))
+# Readers keep evicting each other when they're evicted this often. One eviction clears out the slots of readers that
+# are gone (at every drive start, once a drive has left its readers' slots behind), and the next one is far off, unless
+# a reader finds every slot in use by running readers again. openpilot's readers poll far more often than that.
+STORM_EVICTIONS = 2
+STORM_WINDOW = 10.0
+IMPORT_RETRY = 10.0  # s between tries to load openpilot's messaging, with --wait-on-error
 HOLD_BACK = 10.0  # s before it tries again to read a service it held back
 RETRY_PORTS = 5.0  # s between tries to listen on ports that were in use
 
@@ -101,23 +106,45 @@ def instance_status(pid):
   return None
 
 
-def write_status(pcs):
+def cpu_time(pid):
+  """The process's CPU time so far, in clock ticks, or None."""
   try:
-    with open(STATUSFILE + '.new', 'w') as fh:
-      fh.write(f'{os.getpid()} {pcs} {time.monotonic():.3f}')
-    os.replace(STATUSFILE + '.new', STATUSFILE)
-  except OSError:
-    pass
+    with open(f'/proc/{pid}/stat') as fh:
+      fields = fh.read().rsplit(')', 1)[1].split()  # after the command name, which may hold anything
+    return int(fields[11]) + int(fields[12])  # utime and stime
+  except (OSError, ValueError, IndexError):
+    return None
+
+
+class Status:
+  """This instance's status file. Written in place with the same length every time, so it needs no more room on /tmp
+  once it exists."""
+
+  def __init__(self):
+    self.fd = None
+    try:
+      self.fd = os.open(STATUSFILE, os.O_RDWR | os.O_CREAT, 0o644)
+      os.ftruncate(self.fd, 0)
+    except OSError:
+      pass
+    self.write(0)
+
+  def write(self, pcs):
+    if self.fd is not None:
+      try:
+        os.pwrite(self.fd, f'{os.getpid():>10} {pcs:>5} {time.monotonic():>16.3f}\n'.encode(), 0)
+      except OSError:
+        pass
 
 
 def take_over(stopping):
-  """Makes this the running instance. One that already runs is shared instead, whether another PC's launch started it
-  or it's left from an SSH session that died without the Comma noticing: this waits while it runs, which keeps the
-  session that started this open, and takes over once it's gone. Only one that hangs is replaced. The lock keeps two
-  that start at once from both taking over."""
+  """Makes this the running instance and returns its Status. One that already runs is shared instead, whether another
+  PC's launch started it or it's left from an SSH session that died without the Comma noticing: this waits while it
+  runs, which keeps the session that started this open, and takes over once it's gone. Only one that hangs is
+  replaced. The lock keeps two that start at once from both taking over."""
   shared = None
-  seen = None  # the running instance and its status as last read, and since when that is unchanged
-  lock = os.open(LOCKFILE, os.O_RDWR | os.O_CREAT, 0o644)
+  seen = None  # the running instance, its status and CPU time as last read, and since when they're unchanged
+  lock = os.open(LOCKFILE, os.O_RDONLY | os.O_CREAT, 0o644)  # flock needs no write access
   try:
     while not stopping:
       fcntl.flock(lock, fcntl.LOCK_EX)
@@ -125,10 +152,11 @@ def take_over(stopping):
         pid = running_instance()
         status = instance_status(pid) if pid is not None else None
         now = time.monotonic()
-        if seen is None or seen[0] != (pid, status):
-          seen = ((pid, status), now)
-        # Hung when its status stays the same while this watches it (not by comparing times: a Comma frozen and resumed
-        # would look hung for a moment)
+        state = (pid, status, cpu_time(pid) if pid is not None else None)
+        if seen is None or seen[0] != state:
+          seen = (state, now)
+        # Hung when neither its status nor its CPU time change while this watches it (not by comparing times: a Comma
+        # frozen and resumed would look hung for a moment)
         if pid is None or now - seen[1] >= STALE_AFTER:
           if pid is not None:
             say(f"Stopping comma_bridge.py (pid {pid}): it stopped working")
@@ -140,10 +168,12 @@ def take_over(stopping):
               if not os.path.exists(f'/proc/{pid}'):
                 break
               time.sleep(0.1)
-          with open(PIDFILE, 'w') as fh:
-            fh.write(str(os.getpid()))
-          write_status(0)
-          return
+          try:
+            with open(PIDFILE, 'w') as fh:
+              fh.write(str(os.getpid()))
+          except OSError as exc:
+            say(f"Can't write {PIDFILE} ({exc.strerror}): another one started later won't find this one")
+          return Status()
       finally:
         fcntl.flock(lock, fcntl.LOCK_UN)
       if pid != shared and status is not None:
@@ -160,7 +190,8 @@ def import_messaging(openpilot_dir):
   # As openpilot's own processes import it (launch_chffrplus.sh puts the checkout on PYTHONPATH, with msgq and opendbc
   # linked in from their submodules), so this uses the Comma's own msgq build, ahead of any msgq package in the
   # Python environment. The submodule paths are for checkouts without those links.
-  sys.path[:0] = [openpilot_dir, os.path.join(openpilot_dir, 'msgq_repo'), os.path.join(openpilot_dir, 'opendbc_repo')]
+  paths = [openpilot_dir, os.path.join(openpilot_dir, 'msgq_repo'), os.path.join(openpilot_dir, 'opendbc_repo')]
+  sys.path[:0] = [path for path in paths if path not in sys.path]
   try:
     from openpilot.cereal import messaging
   except ModuleNotFoundError as exc:
@@ -176,11 +207,12 @@ def import_messaging(openpilot_dir):
 
 
 MISMATCH = 'mismatch'
-# readers: the queue's num_readers, which only goes down when msgq clears all slots. total: how many slots there are,
+# readers: the queue's num_readers, which only goes down when msgq clears all slots. writer: the publisher's uid, new
+# with every publisher start, which clears the slots too. total: how many slots there are,
 # None for a header layout this doesn't know (then used, live and ours are None too). ours: this process's uid when one
 # of the used slots is its (it subscribes and reads in its main thread, whose thread id is the pid). live: how many of
 # them belong to running threads, only counted when none is ours and all are used.
-Slots = collections.namedtuple('Slots', 'readers total used live ours')
+Slots = collections.namedtuple('Slots', 'readers writer total used live ours')
 
 
 def reader_slots(name, queue_size):
@@ -205,9 +237,10 @@ def reader_slots(name, queue_size):
         header = fh.read(24 + 24 * 25)
     except OSError:
       continue
-    if len(header) < 8:
+    if len(header) < 24:
       return None
     readers = int.from_bytes(header[:8], 'little')
+    writer = int.from_bytes(header[16:24], 'little')
     # The header is small, while queue sizes differ by far more, so this holds whatever the header's layout
     if queue_size and not 0 < size - queue_size <= 4096:
       return MISMATCH
@@ -218,13 +251,13 @@ def reader_slots(name, queue_size):
       if (size - segment - 24) % 24 == 0 and total in (15, 25) and len(header) >= 24 + 24 * total:
         break
     else:
-      return Slots(readers, None, None, None, None)
+      return Slots(readers, writer, None, None, None, None)
     used = min(readers, total)
     uids = [int.from_bytes(header[24 + 16 * total + 8 * i:24 + 16 * total + 8 * i + 8], 'little') for i in range(used)]
     ours = next((uid for uid in uids if uid & 0xFFFFFFFF == os.getpid()), None)
     live = sum(1 for uid in uids if uid & 0xFFFFFFFF and os.path.exists(f'/proc/{uid & 0xFFFFFFFF}')) \
         if ours is None and used >= total else None
-    return Slots(readers, total, used, live, ours)
+    return Slots(readers, writer, total, used, live, ours)
   return None
 
 
@@ -243,22 +276,28 @@ def why_not_read(service, slots):
 
 
 def evictions_seen(service, slots, now):
-  """Notes when msgq has cleared the service's reader slots since the last look (it evicted all readers, or the
-  publisher restarted), and returns whether that keeps happening. Each read and poll then subscribes this reader again
-  by itself, before anything here can look, so it shows as num_readers going down, or as this reader's new uid."""
+  """Notes when the service's readers were evicted since the last look, and returns whether that keeps happening.
+  msgq then clears all slots, and each read and poll subscribes this reader again by itself, before anything here can
+  look: so an eviction shows as num_readers going down, or as this reader's new uid. A publisher that starts clears
+  the slots as well, but gets a new uid of its own; that's no eviction."""
   if not isinstance(slots, Slots):
     return False
-  cleared = False
-  if service.readers is not None and slots.readers < service.readers:
-    cleared = True
-    service.uid = None  # it subscribes again by itself: the same clearing
+  evicted = False
+  if service.writer is not None and slots.writer != service.writer:
+    service.uid = None  # this reader subscribes again by itself after that
+  else:
+    if service.readers is not None and slots.readers < service.readers:
+      evicted = True
+      service.uid = None  # this reader subscribes again by itself: the same eviction
+    if slots.ours is not None and service.uid is not None and slots.ours != service.uid:
+      evicted = True
+  service.writer = slots.writer
   service.readers = slots.readers
   if slots.ours is not None:
-    cleared = cleared or (service.uid is not None and slots.ours != service.uid)
     service.uid = slots.ours
-  if cleared:
-    service.cleared = [t for t in service.cleared if now - t < STORM[-1][1]] + [now]
-  return any(len(service.cleared) >= n and now - service.cleared[-n] < window for n, window in STORM)
+  if evicted:
+    service.evictions = [t for t in service.evictions if now - t < STORM_WINDOW] + [now]
+  return len(service.evictions) >= STORM_EVICTIONS
 
 
 class Service:
@@ -273,7 +312,8 @@ class Service:
     self.held_back = False
     self.uid = None  # its msgq reader's uid when last checked; msgq gives it a new one with each subscription
     self.readers = None  # its queue's num_readers when last checked
-    self.cleared = []  # when msgq was seen clearing its queue's reader slots lately
+    self.writer = None  # its publisher's uid when last checked
+    self.evictions = []  # when its readers were seen evicted lately
 
 
 class Reporter:
@@ -313,15 +353,28 @@ def main():
                       help="after an error that starting again won't fix, wait to be stopped instead of exiting")
   args = parser.parse_args()
 
-  try:
-    messaging = import_messaging(args.openpilot_dir)
-  except CantStart as exc:
-    give_up(str(exc), args.wait_on_error)
-  except Exception as exc:
-    if not isinstance(exc, ModuleNotFoundError):
-      traceback.print_exc()
-    give_up(f"Can't load openpilot's messaging from {args.openpilot_dir} ({exc}): is openpilot there, and built?",
-            args.wait_on_error)
+  failed = False
+  while True:
+    try:
+      messaging = import_messaging(args.openpilot_dir)
+      break
+    except CantStart as exc:
+      give_up(str(exc), args.wait_on_error)
+    except Exception as exc:
+      if not failed and not isinstance(exc, ModuleNotFoundError):
+        traceback.print_exc()
+      message = f"Can't load openpilot's messaging from {args.openpilot_dir} ({exc}): is openpilot there, and built?"
+      if not args.wait_on_error:
+        say(message)
+        sys.exit(3)
+      # It may still be getting built (right after a boot on a source branch): try again by itself rather than make the
+      # launch start a new SSH session and Python every few seconds
+      if not failed:
+        say(f"{message} Trying again every {IMPORT_RETRY:.0f} s")
+        failed = True
+      time.sleep(IMPORT_RETRY)
+  if failed:
+    say("Loaded openpilot's messaging")
   sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
   import comma_zmtp
 
@@ -333,7 +386,7 @@ def main():
   for sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT):
     signal.signal(sig, stop)
 
-  take_over(stopping)
+  status = take_over(stopping)
 
   names = [n for n in args.services.split(',') if n] if args.services else list(messaging.SERVICE_LIST)
   services = []
@@ -375,7 +428,7 @@ def main():
   last_drop_report = {}
   unknown_layout = []  # said once that the queues' layout is unknown
   say(f"Serving {len(services)} openpilot services on their cereal bridge ports (pid {os.getpid()})")
-  write_status(0)
+  status.write(0)
   last_status = time.monotonic()
 
   def forget(conn):
@@ -483,8 +536,8 @@ def main():
           else:
             messaging.drain_sock_raw(service.sock)  # what queued up while no PC was connected is stale
           service.active = True
-          service.uid = service.readers = None
-          service.cleared = []
+          service.uid = service.readers = service.writer = None
+          service.evictions = []
           evictions_seen(service, reader_slots(service.name, service.queue_size), now)
           service.next_check = now + SLOT_CHECK_PERIOD
         elif not ready and service.active:
@@ -523,7 +576,7 @@ def main():
       reporter.flush(now)
       if now - last_status >= 1.0:
         last_status = now
-        write_status(len({conn.address for service in connected for conn in service.publisher.ready_peers()}))
+        status.write(len({conn.address for service in connected for conn in service.publisher.ready_peers()}))
   finally:
     for sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT):
       signal.signal(sig, signal.SIG_IGN)

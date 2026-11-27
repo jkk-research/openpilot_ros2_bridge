@@ -20,7 +20,8 @@ class Service:
     self.queue_size = queue_size
     self.uid = None
     self.readers = None
-    self.cleared = []
+    self.writer = None
+    self.evictions = []
 
 
 class ReaderSlotsTest(unittest.TestCase):
@@ -56,9 +57,9 @@ class ReaderSlotsTest(unittest.TestCase):
     self.threads.append(t)
     return tids[0]
 
-  def write_queue(self, total, uids, segment=QUEUE_SIZE, extra=0, readers=None):
+  def write_queue(self, total, uids, segment=QUEUE_SIZE, extra=0, readers=None, writer=77):
     readers = len(uids) if readers is None else readers
-    header = readers.to_bytes(8, 'little') + bytes(16) + bytes(16 * total)
+    header = readers.to_bytes(8, 'little') + bytes(8) + writer.to_bytes(8, 'little') + bytes(16 * total)
     header += b''.join(uid.to_bytes(8, 'little') for uid in uids) + bytes(8 * (total - len(uids)) + extra)
     with open(self.path, 'wb') as fh:
       fh.write(header + bytes(segment))
@@ -71,14 +72,14 @@ class ReaderSlotsTest(unittest.TestCase):
     for total in (15, 25):
       self.write_queue(total, [(7 << 32) | self.live_tid()])
       slots = comma_bridge.reader_slots(self.name, QUEUE_SIZE)
-      self.assertEqual(slots, comma_bridge.Slots(readers=1, total=total, used=1, live=None, ours=None))
+      self.assertEqual(slots, comma_bridge.Slots(readers=1, writer=77, total=total, used=1, live=None, ours=None))
       self.assertIsNone(comma_bridge.why_not_read(Service(self.name), slots))
 
   def test_all_slots_live_holds_back(self):
     for total in (15, 25):
       self.write_queue(total, [(i << 32) | self.live_tid() for i in range(total)])
       slots = comma_bridge.reader_slots(self.name, QUEUE_SIZE)
-      self.assertEqual(slots, comma_bridge.Slots(readers=total, total=total, used=total, live=total, ours=None))
+      self.assertEqual(slots, comma_bridge.Slots(readers=total, writer=77, total=total, used=total, live=total, ours=None))
       self.assertIn('evicting', comma_bridge.why_not_read(Service(self.name), slots))
 
   def test_stale_slots_dont_hold_back(self):
@@ -110,53 +111,87 @@ class ReaderSlotsTest(unittest.TestCase):
     # change adds 32 words after the slots, and openpilot before 0.11.2 gives no queue sizes
     self.write_queue(25, [], extra=8 * 32, readers=3)
     slots = comma_bridge.reader_slots(self.name, QUEUE_SIZE)
-    self.assertEqual(slots, comma_bridge.Slots(readers=3, total=None, used=None, live=None, ours=None))
+    self.assertEqual(slots, comma_bridge.Slots(readers=3, writer=77, total=None, used=None, live=None, ours=None))
     self.assertIsNone(comma_bridge.why_not_read(Service(self.name), slots))
     self.write_queue(15, [], segment=12345)
     self.assertEqual(comma_bridge.reader_slots(self.name, 0).total, None)
 
 
 class EvictionsTest(unittest.TestCase):
-  """evictions_seen(): msgq clearing a queue's slots again and again means its readers keep evicting each other."""
+  """evictions_seen(): readers evicted again and again means they keep evicting each other; a publisher start isn't."""
 
-  def slots(self, readers, ours=None):
-    return comma_bridge.Slots(readers=readers, total=15, used=min(readers, 15), live=None, ours=ours)
+  def slots(self, readers, ours=None, writer=1):
+    return comma_bridge.Slots(readers=readers, writer=writer, total=15, used=min(readers, 15), live=None, ours=ours)
 
-  def test_one_clearing_is_no_storm(self):
-    # A publisher that restarts clears the slots once; this reader then subscribes again with a new uid
+  def test_one_eviction_is_no_storm(self):
+    # One clears out the slots of readers that are gone; this reader then subscribes again with a new uid
     s = Service('x')
     self.assertFalse(comma_bridge.evictions_seen(s, self.slots(15, ours=1), 0.0))
-    self.assertFalse(comma_bridge.evictions_seen(s, self.slots(2), 0.1))  # cleared, not subscribed again yet
-    self.assertFalse(comma_bridge.evictions_seen(s, self.slots(14, ours=2), 0.2))  # the same clearing
+    self.assertFalse(comma_bridge.evictions_seen(s, self.slots(2), 0.1))  # evicted, not subscribed again yet
+    self.assertFalse(comma_bridge.evictions_seen(s, self.slots(14, ours=2), 0.2))  # the same eviction
     self.assertFalse(comma_bridge.evictions_seen(s, self.slots(15, ours=2), 0.3))
-    self.assertEqual(len(s.cleared), 1)
+    self.assertEqual(len(s.evictions), 1)
 
-  def test_clearings_in_a_row_are_a_storm(self):
+  def test_publisher_starts_are_no_evictions(self):
+    # At a drive start: one eviction of the last drive's readers, then the publisher starts, clearing the slots again
+    s = Service('x')
+    comma_bridge.evictions_seen(s, self.slots(15, ours=1), 0.0)
+    self.assertFalse(comma_bridge.evictions_seen(s, self.slots(3, ours=2), 0.1))
+    self.assertFalse(comma_bridge.evictions_seen(s, self.slots(1, writer=2), 0.2))
+    self.assertFalse(comma_bridge.evictions_seen(s, self.slots(13, ours=3, writer=2), 0.3))
+    self.assertFalse(comma_bridge.evictions_seen(s, self.slots(2, ours=4, writer=3), 0.4))  # and it restarts
+    self.assertEqual(len(s.evictions), 1)
+
+  def test_evictions_in_a_row_are_a_storm(self):
     s = Service('x')
     comma_bridge.evictions_seen(s, self.slots(15, ours=1), 0.0)
     self.assertFalse(comma_bridge.evictions_seen(s, self.slots(15, ours=2), 0.1))  # num_readers back up already
     self.assertTrue(comma_bridge.evictions_seen(s, self.slots(9, ours=3), 0.2))
 
   def test_slow_storm(self):
+    # A reader that reads only every few seconds evicts the others each time
     s = Service('x')
-    comma_bridge.evictions_seen(s, self.slots(15), 0.0)
-    self.assertFalse(comma_bridge.evictions_seen(s, self.slots(4), 1.0))
-    self.assertFalse(comma_bridge.evictions_seen(s, self.slots(2), 2.5))
-    self.assertTrue(comma_bridge.evictions_seen(s, self.slots(1), 4.0))
+    comma_bridge.evictions_seen(s, self.slots(15, ours=1), 0.0)
+    self.assertFalse(comma_bridge.evictions_seen(s, self.slots(15, ours=2), 3.0))
+    self.assertTrue(comma_bridge.evictions_seen(s, self.slots(15, ours=3), 6.0))
 
-  def test_clearings_far_apart_are_no_storm(self):
+  def test_evictions_far_apart_are_no_storm(self):
     s = Service('x')
     comma_bridge.evictions_seen(s, self.slots(15), 0.0)
-    for t in range(1, 30, 3):
+    for t in range(1, 600, 90):
       self.assertFalse(comma_bridge.evictions_seen(s, self.slots(3), float(t)))
       self.assertFalse(comma_bridge.evictions_seen(s, self.slots(15), t + 0.5))
 
   def test_unknown_layout_still_watched(self):
     s = Service('x')
-    unknown = [comma_bridge.Slots(readers=r, total=None, used=None, live=None, ours=None) for r in (25, 3, 1)]
+    unknown = [comma_bridge.Slots(readers=r, writer=1, total=None, used=None, live=None, ours=None) for r in (25, 3, 1)]
     self.assertFalse(comma_bridge.evictions_seen(s, unknown[0], 0.0))
     self.assertFalse(comma_bridge.evictions_seen(s, unknown[1], 0.1))
     self.assertTrue(comma_bridge.evictions_seen(s, unknown[2], 0.2))
+
+
+class InstanceTest(unittest.TestCase):
+  def test_cpu_time(self):
+    self.assertIsInstance(comma_bridge.cpu_time(os.getpid()), int)
+    self.assertIsNone(comma_bridge.cpu_time(2 ** 22 + 12345))
+
+  def test_status_written_in_place(self):
+    # The running instance's status keeps its length, so rewriting it needs no more room on /tmp
+    path = comma_bridge.STATUSFILE
+    saved = open(path, 'rb').read() if os.path.exists(path) else None
+    comma_bridge.STATUSFILE = f'/tmp/cbtest_status_{os.getpid()}'
+    try:
+      status = comma_bridge.Status()
+      first = open(comma_bridge.STATUSFILE).read()
+      status.write(3)
+      second = open(comma_bridge.STATUSFILE).read()
+      self.assertEqual(len(first), len(second))
+      self.assertEqual(comma_bridge.instance_status(os.getpid())[0], 3)
+      self.assertIsNone(comma_bridge.instance_status(os.getpid() + 1))
+    finally:
+      os.remove(comma_bridge.STATUSFILE)
+      comma_bridge.STATUSFILE = path
+    self.assertEqual(saved, open(path, 'rb').read() if os.path.exists(path) else None)
 
 
 class PortTest(unittest.TestCase):

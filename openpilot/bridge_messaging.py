@@ -39,11 +39,17 @@ def make_endpoint_dir(directory=None):
   """Creates the endpoint directory, or checks the one that exists: in a shared /tmp another user could have made it
   first, to put endpoints of their own there. The receiver and the nodes both call this, whichever starts first."""
   directory = directory or endpoint_dir()
-  os.makedirs(directory, mode=0o700, exist_ok=True)
-  info = os.lstat(directory)
+  try:
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+  except OSError:
+    pass  # something else is in the way: the checks below tell what
+  try:
+    info = os.lstat(directory)
+  except OSError as exc:
+    raise PermissionError(f"Can't create {directory}: {exc.strerror}") from exc
   if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
-    raise PermissionError(f"{directory} isn't a directory of this user that only this user can write to; remove it, "
-                          f"or set {ENDPOINT_DIR_VARIABLE} to another directory")
+    raise PermissionError(f"{directory} isn't a directory of this user that only this user can write to; use another "
+                          f"namespace, or set {ENDPOINT_DIR_VARIABLE} to a directory of your own")
   return directory
 
 

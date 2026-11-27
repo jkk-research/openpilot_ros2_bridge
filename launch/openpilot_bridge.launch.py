@@ -29,7 +29,8 @@ def _environment():
         '/opendbc_repo:${PYTHONPATH:-}" && ',
         'NS="',
         LaunchConfiguration('namespace'),
-        '" && export OPENPILOT_ROS2_BRIDGE_IPC="/tmp/openpilot_ros2_bridge_$(id -u)_$(printf %s "$NS" | sha1sum | cut -c1-12)" && ',
+        # The same directory as bridge_messaging.endpoint_dir(); one set beforehand is kept
+        '" && export OPENPILOT_ROS2_BRIDGE_IPC="${OPENPILOT_ROS2_BRIDGE_IPC:-/tmp/openpilot_ros2_bridge_$(id -u)_$(printf %s "$NS" | sha1sum | cut -c1-12)}" && ',
     ]
 
 
