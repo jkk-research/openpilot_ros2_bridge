@@ -14,9 +14,12 @@ install(DIRECTORY cereal DESTINATION share/${PROJECT_NAME} FILES_MATCHING PATTER
 
 # The launch files run the nodes as scripts from share/<package>/scripts
 file(GLOB node_scripts CONFIGURE_DEPENDS openpilot/*.py)
-install(PROGRAMS ${node_scripts} scripts/setup_bridge_venv.sh scripts/build_openpilot_minimal.sh
+install(PROGRAMS ${node_scripts} scripts/setup_bridge_venv.sh
+  scripts/comma_bridge.py scripts/start_comma_bridge.sh
   scripts/comma_joystick_relay.py scripts/start_comma_joystick_relay.sh
   DESTINATION share/${PROJECT_NAME}/scripts)
+# Copied to the Comma next to the scripts above; imported there, so not executable
+install(FILES scripts/comma_zmtp.py DESTINATION share/${PROJECT_NAME}/scripts)
 
 install(FILES docker/Dockerfile DESTINATION share/${PROJECT_NAME}/docker)
 install(PROGRAMS docker/run_openpilot_bridge_container.sh docker/run_openpilot_bridge_host.sh

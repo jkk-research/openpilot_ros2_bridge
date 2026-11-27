@@ -32,16 +32,20 @@ def generate_launch_description():
     root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
     host_runner = os.path.join(root, 'docker', 'run_openpilot_bridge_host.sh')
 
+    # The Comma side of the bridge: scripts/comma_bridge.py, or openpilot's own cereal bridge (comma_bridge)
     remote_bridge = ExecuteProcess(
         condition=IfCondition(LaunchConfiguration('start_remote_bridge')),
         cmd=[
-            'ssh', '-tt', '-o', 'BatchMode=yes', '-o', 'ServerAliveInterval=5',
+            'bash',
+            os.path.join(root, 'scripts', 'start_comma_bridge.sh'),
             LaunchConfiguration('remote_bridge_target'),
-            [
-                'if pgrep -x bridge >/dev/null; then echo "cereal bridge already running on the Comma"; exit 0; fi; ',
-                LaunchConfiguration('remote_bridge_command'),
-            ],
+            LaunchConfiguration('comma_openpilot_dir'),
+            LaunchConfiguration('comma_bridge'),
+            LaunchConfiguration('remote_bridge_command'),
         ],
+        # ssh ends after about 15 s without the Comma (ServerAliveInterval); connect again once it's back
+        respawn=True,
+        respawn_delay=5.0,
         output='screen',
     )
 
@@ -119,10 +123,11 @@ def generate_launch_description():
         DeclareLaunchArgument('base_frame_height', default_value='0.0'),
         DeclareLaunchArgument('start_remote_bridge', default_value='false'),
         DeclareLaunchArgument('remote_bridge_target', default_value=['comma@', LaunchConfiguration('comma_ip')]),
-        DeclareLaunchArgument(
-            'remote_bridge_command',
-            default_value='cd /data/openpilot/openpilot/cereal/messaging 2>/dev/null || cd /data/openpilot/cereal/messaging && exec ./bridge',
-        ),
+        # The Comma's side: python runs scripts/comma_bridge.py (any openpilot version); cereal runs openpilot's own cereal
+        # bridge (openpilot 0.11.2 and older), auto that one where the Comma's openpilot has it
+        DeclareLaunchArgument('comma_bridge', default_value='python'),
+        # Runs this on the Comma instead, when set
+        DeclareLaunchArgument('remote_bridge_command', default_value=''),
         DeclareLaunchArgument('modelv2_port', default_value='modelV2'),
         DeclareLaunchArgument('longitudinal_plan_port', default_value='longitudinalPlan'),
         DeclareLaunchArgument('lateral_plan_port', default_value='lateralPlan'),

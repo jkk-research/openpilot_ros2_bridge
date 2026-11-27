@@ -13,7 +13,7 @@ import time
 
 import numpy as np
 import rclpy
-import cereal.messaging as messaging
+import bridge_messaging as messaging
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import QoSProfile
@@ -73,8 +73,7 @@ class OpenPilotCanFramePublisher(Node):
         self.get_logger().info("OpenPilot CAN frame publisher is ready.")
 
     def cereal_loop(self, topic_name):
-        # Subscribed from the thread that reads: msgq wakes the thread that subscribed when a batch arrives, and any
-        # other thread only notices on its next 100 ms poll, so the batches would come in bursts
+        # Created in the thread that reads it, as a ZeroMQ socket must only be used from one thread
         sock = messaging.sub_sock(topic_name)
         self.get_logger().info(f"Subscribed to openpilot messaging topic: {topic_name}")
         last_error = -math.inf

@@ -34,7 +34,7 @@ if [[ -z "${HOST_OPENPILOT_ROOT}" ]]; then
   exit 1
 fi
 
-# Stop a previous bridge first: it may be using the openpilot build that gets refreshed below
+# Stop a previous bridge first: it may be using the openpilot checkout that gets switched below
 docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
 
 pull_image() {
@@ -55,7 +55,7 @@ case "${IMAGE_SOURCE}" in
     docker build -t "${IMAGE_NAME}" -f "${REPO_ROOT}/docker/Dockerfile" "${REPO_ROOT}"
     ;;
   cyclone)
-    # The published image now includes CycloneDDS and the openpilot build tools, so there is nothing to build
+    # The published image now includes CycloneDDS, so there is nothing to build
     echo "image_source:=cyclone is no longer needed; using ${PUBLISHED_IMAGE} instead of ${IMAGE_NAME}" >&2
     IMAGE_NAME="${PUBLISHED_IMAGE}"
     pull_image
@@ -129,10 +129,11 @@ if [[ -n "${HOST_PACKAGE_PREFIX}" && "$(interface_digests_of "${HOST_PACKAGE_PRE
     "(image_name:=openpilot_ros2_bridge:local image_source:=build)." >&2
 fi
 
-# Check out the Comma's openpilot commit and build msgq + cereal bridge, each only when needed
+# Check out the Comma's openpilot commit, when it isn't already: the nodes decode its messages with that version's
+# schema, service list and opendbc. Nothing in it has to be built.
 prepare_openpilot() {
-  local info="" url commit current head
-  local stamp="${HOST_OPENPILOT_ROOT}/.bridge_build_commit"
+  local info="" url commit current path
+  local -a submodules=()
 
   if [[ -n "${COMMA_TARGET}" ]]; then
     info="$(ssh -o BatchMode=yes -o ConnectTimeout=5 "${COMMA_TARGET}" \
@@ -156,13 +157,34 @@ prepare_openpilot() {
     current="$(git -C "${HOST_OPENPILOT_ROOT}" rev-parse -q --verify HEAD || true)"
     if [[ "${current}" == "${commit}" ]]; then
       echo "openpilot checkout already at the Comma's commit ${commit:0:8}"
-    elif [[ -n "${current}" && -n "$(git -C "${HOST_OPENPILOT_ROOT}" status --porcelain --untracked-files=no)" ]]; then
+    # Files that .gitattributes routes through git-lfs are left out of this check: the bridge doesn't use them, and
+    # git can report them as modified when they aren't (openpilot commits some *.npz files there that aren't LFS
+    # pointers, and LFS files can look changed to git without the LFS filter)
+    elif [[ -n "${current}" && -n "$(git -C "${HOST_OPENPILOT_ROOT}" status --porcelain --untracked-files=no \
+        -- . ':(exclude,attr:filter=lfs)')" ]]; then
       echo "${HOST_OPENPILOT_ROOT} has local changes; not switching it to the Comma's commit ${commit:0:8}" >&2
     else
       echo "Checking out openpilot ${commit:0:8} from ${url} to match the Comma"
       git -C "${HOST_OPENPILOT_ROOT}" fetch -q --depth 1 "${url}" "${commit}"
       git -C "${HOST_OPENPILOT_ROOT}" checkout -q --detach FETCH_HEAD
-      git -C "${HOST_OPENPILOT_ROOT}" submodule update -q --init --depth 1 msgq_repo opendbc_repo
+      current="${commit}"
+    fi
+
+    # opendbc, and cereal where it was a submodule (old openpilot); checked every time, in case an earlier launch
+    # stopped before they were checked out
+    if [[ "${current}" == "${commit}" ]]; then
+      for path in opendbc_repo opendbc cereal; do
+        if git -C "${HOST_OPENPILOT_ROOT}" config -f .gitmodules --get-regexp '^submodule\..*\.path$' 2>/dev/null |
+            awk '{print $2}' | grep -qxF "${path}"; then
+          submodules+=("${path}")
+        fi
+      done
+      if (( ${#submodules[@]} )) && [[ -n "$(git -C "${HOST_OPENPILOT_ROOT}" submodule status -- "${submodules[@]}" |
+          grep '^[-+U]' || true)" ]]; then
+        echo "Checking out ${submodules[*]} in ${HOST_OPENPILOT_ROOT}"
+        git -C "${HOST_OPENPILOT_ROOT}" submodule update -q --init --depth 1 "${submodules[@]}" ||
+          echo "Could not check out ${submodules[*]} in ${HOST_OPENPILOT_ROOT}" >&2
+      fi
     fi
   fi
 
@@ -170,27 +192,18 @@ prepare_openpilot() {
     echo "Missing openpilot source tree under ${HOST_OPENPILOT_ROOT}/openpilot" >&2
     exit 1
   fi
-
-  head="$(git -C "${HOST_OPENPILOT_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)"
-  if [[ -f "${HOST_OPENPILOT_ROOT}/msgq_repo/msgq/ipc_pyx.so" \
-        && -x "${HOST_OPENPILOT_ROOT}/openpilot/cereal/messaging/bridge" \
-        && "$(cat "${stamp}" 2>/dev/null)" == "${head}" ]]; then
-    echo "openpilot ${head:0:8} already built for the bridge"
-    return
-  fi
-
-  echo "Building msgq and the cereal bridge for openpilot ${head:0:8}"
-  docker run --rm --user "$(id -u):$(id -g)" \
-    -v "${HOST_OPENPILOT_ROOT}:/workspace/openpilot" \
-    -v "${REPO_ROOT}/scripts/build_openpilot_minimal.sh:/build_openpilot_minimal.sh:ro" \
-    "${IMAGE_NAME}" bash /build_openpilot_minimal.sh
-  echo "${head}" > "${stamp}"
 }
 
 if [[ "${PREPARE_OPENPILOT}" == "true" ]]; then
   prepare_openpilot
 elif [[ ! -d "${HOST_OPENPILOT_ROOT}/openpilot" ]]; then
   echo "Missing openpilot source tree under ${HOST_OPENPILOT_ROOT}/openpilot" >&2
+  exit 1
+fi
+# Every message definition imports opendbc's car.capnp, so none of the nodes could start without it
+if [[ -d "${HOST_OPENPILOT_ROOT}/opendbc_repo" && -z "$(ls -A "${HOST_OPENPILOT_ROOT}/opendbc_repo")" ]]; then
+  echo "${HOST_OPENPILOT_ROOT}/opendbc_repo is empty: check it out with" \
+    "'git -C ${HOST_OPENPILOT_ROOT} submodule update --init opendbc_repo', or use prepare_openpilot:=true" >&2
   exit 1
 fi
 

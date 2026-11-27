@@ -22,6 +22,7 @@ import os
 import signal
 import sys
 import time
+import traceback
 
 SERVICE = 'testJoystick'
 PARAM = 'JoystickDebugMode'
@@ -52,6 +53,50 @@ def say(text):
         pass  # the SSH session's terminal is gone; keep going so the cleanup still runs
 
 
+def give_up(message, wait):
+    """Reports an error that starting again won't fix. With wait (the launch starts this again whenever it ends) it
+    then waits to be stopped, so the Comma doesn't get a new SSH session and Python start every few seconds."""
+    say(message)
+    if not wait:
+        sys.exit(3)
+    say("Starting it again wouldn't help; fix that and restart the launch")
+    for sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, signal.SIG_DFL)
+    while True:
+        signal.pause()
+
+
+def joystick_receiver(host, port):
+    """A function that returns the newest message from the PC's sender, or None after 100 ms without one."""
+    try:
+        import zmq
+    except ImportError:
+        # openpilot dropped pyzmq in October 2026; comma_zmtp.py, copied next to this file, speaks ZeroMQ instead.
+        # The sender transmits at 100 Hz, so 3 s of silence means the connection is dead.
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import comma_zmtp
+        sub = comma_zmtp.Subscriber(host, port, conflate=True, reconnect=0.5, silence=3.0)
+        return lambda: sub.recv(0.1)
+
+    context = zmq.Context()
+    sub = context.socket(zmq.SUB)
+    sub.setsockopt(zmq.SUBSCRIBE, b'')
+    sub.setsockopt(zmq.CONFLATE, 1)
+    sub.setsockopt(zmq.RCVBUF, 4096)
+    sub.setsockopt(zmq.RCVTIMEO, 100)
+    # Notice a PC that went away without closing the connection, and reconnect when it's back
+    sub.setsockopt(zmq.HEARTBEAT_IVL, 1000)
+    sub.setsockopt(zmq.HEARTBEAT_TIMEOUT, 3000)
+    sub.connect(f'tcp://{host}:{port}')
+
+    def recv():
+        try:
+            return sub.recv()
+        except zmq.Again:
+            return None
+    return recv
+
+
 def remove(path):
     try:
         os.remove(path)
@@ -65,7 +110,9 @@ def stop_previous_relay():
         with open(PIDFILE) as fh:
             pid = int(fh.read())
         with open(f'/proc/{pid}/cmdline', 'rb') as fh:
-            running = os.path.basename(__file__).encode() in fh.read()
+            cmdline = fh.read()
+        # Also the relay of earlier versions of the bridge, which ran as /tmp/openpilot_ros2_joystick_relay.py
+        running = any(name in cmdline for name in (os.path.basename(__file__).encode(), b'openpilot_ros2_joystick_relay.py'))
     except (OSError, ValueError):
         running = False
     if running and pid != os.getpid():
@@ -197,6 +244,8 @@ def main():
     parser.add_argument('--openpilot-dir', default='/data/openpilot')
     parser.add_argument('--host', default='', help="the PC's address (default: where this SSH session comes from)")
     parser.add_argument('--port', type=int, default=0, help=f"default: the cereal bridge's port for {SERVICE}")
+    parser.add_argument('--wait-on-error', action='store_true',
+                        help="after an error that starting again won't fix, wait to be stopped instead of exiting")
     args = parser.parse_args()
 
     host = args.host or os.environ.get('SSH_CLIENT', '').split(' ')[0]
@@ -205,13 +254,26 @@ def main():
     port = args.port or bridge_port(SERVICE)
 
     # Newer openpilot keeps its packages under <dir>/openpilot; older versions import openpilot.* through a symlink
-    sys.path[:0] = [args.openpilot_dir, os.path.join(args.openpilot_dir, 'msgq_repo')]
-    import zmq
+    sys.path[:0] = [args.openpilot_dir, os.path.join(args.openpilot_dir, 'msgq_repo'),
+                    os.path.join(args.openpilot_dir, 'opendbc_repo')]
     try:
-        from openpilot.cereal import messaging
-    except ImportError:
-        import cereal.messaging as messaging
-    from openpilot.common.params import Params
+        try:
+            from openpilot.cereal import messaging
+        except ModuleNotFoundError as exc:
+            # openpilot before 0.11.2 keeps cereal at the top; anything else missing is a real error, reported below
+            if exc.name not in ('openpilot', 'openpilot.cereal'):
+                raise
+            import cereal.messaging as messaging
+        from openpilot.common.params import Params
+    except Exception as exc:
+        if not isinstance(exc, ModuleNotFoundError):
+            traceback.print_exc()
+        give_up(f"Can't load openpilot's libraries from {args.openpilot_dir} ({exc}): is openpilot there, and built?",
+                args.wait_on_error)
+    # A msgq built for another openpilot version would crash joystickd, so only the Comma's own will do
+    msgq = sys.modules.get('msgq')
+    if msgq is not None and not os.path.realpath(msgq.__file__).startswith(os.path.realpath(args.openpilot_dir) + os.sep):
+        give_up(f"msgq comes from {msgq.__file__}, not from {args.openpilot_dir}; not starting", args.wait_on_error)
 
     stopping = []
 
@@ -224,16 +286,7 @@ def main():
     stop_previous_relay()
     mode = JoystickMode(Params())
     freshness = Freshness()
-    context = zmq.Context()
-    sub = context.socket(zmq.SUB)
-    sub.setsockopt(zmq.SUBSCRIBE, b'')
-    sub.setsockopt(zmq.CONFLATE, 1)
-    sub.setsockopt(zmq.RCVBUF, 4096)
-    sub.setsockopt(zmq.RCVTIMEO, 100)
-    # Notice a PC that went away without closing the connection, and reconnect when it's back
-    sub.setsockopt(zmq.HEARTBEAT_IVL, 1000)
-    sub.setsockopt(zmq.HEARTBEAT_TIMEOUT, 3000)
-    sub.connect(f'tcp://{host}:{port}')
+    receive = joystick_receiver(host, port)
     pub = messaging.pub_sock(SERVICE)
     say(f"Waiting for joystick commands from {host}:{port}")
 
@@ -249,9 +302,8 @@ def main():
                 next_check = now + 1.0
                 mode.update(now, now - last_received)
 
-            try:
-                data = sub.recv()
-            except zmq.Again:
+            data = receive()
+            if data is None:
                 if receiving and now - last_received > 1.0:
                     receiving = False
                     say("Nothing from the PC for 1 s")

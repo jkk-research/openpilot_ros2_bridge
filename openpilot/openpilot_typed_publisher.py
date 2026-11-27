@@ -8,7 +8,7 @@ import threading
 import time
 
 import rclpy
-import cereal.messaging as messaging
+import bridge_messaging as messaging
 from cereal import log
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node

@@ -55,10 +55,13 @@ class OpenPilotCameraPublisher(Node):
         if self.camera not in CAMERA_SERVICES:
             raise ValueError(f"Unknown camera '{self.camera}', expected one of {', '.join(CAMERA_SERVICES)}")
 
-        # Connect directly to the cereal bridge running on the Comma device
+        # Connect directly to the Comma side of the bridge (openpilot's cereal bridge, or scripts/comma_bridge.py)
         context = zmq.Context()
         self.socket = context.socket(zmq.SUB)
         self.socket.setsockopt_string(zmq.SUBSCRIBE, "")
+        # Heartbeats notice a connection that died without closing (the Comma rebooted), so it's made again
+        self.socket.setsockopt(zmq.HEARTBEAT_IVL, 1000)
+        self.socket.setsockopt(zmq.HEARTBEAT_TIMEOUT, 5000)
         for service in CAMERA_SERVICES[self.camera]:
             self.socket.connect(f"tcp://{openpilot_ip}:{zmq_port(service)}")
 

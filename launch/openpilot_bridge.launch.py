@@ -5,33 +5,43 @@ from launch.substitutions import EnvironmentVariable, LaunchConfiguration, Pytho
 from ament_index_python.packages import get_package_share_directory
 
 
+def _script_path(script_name):
+    return f"{get_package_share_directory('openpilot_ros2_bridge')}/scripts/{script_name}"
+
+
+def _environment():
+    # What every bridge process gets: ROS, the bridge venv and the openpilot checkout on PYTHONPATH (for its message
+    # schema, service list and opendbc; nothing in it has to be built), and the directory where the bridge receiver
+    # offers the Comma's services to the nodes: one per user and namespace, so two bridges on one machine don't mix,
+    # with the namespace hashed as in bridge_messaging.py (a Unix socket's path is at most 107 characters)
+    return [
+        'source /opt/ros/',
+        LaunchConfiguration('ros_distro'),
+        '/setup.bash && ',
+        'export PYTHONPATH="',
+        LaunchConfiguration('bridge_venv'),
+        '/lib/python3.12/site-packages:',
+        LaunchConfiguration('openpilot_root'),
+        ':',
+        LaunchConfiguration('openpilot_root'),
+        '/openpilot:',
+        LaunchConfiguration('openpilot_root'),
+        '/opendbc_repo:${PYTHONPATH:-}" && ',
+        'NS="',
+        LaunchConfiguration('namespace'),
+        '" && export OPENPILOT_ROS2_BRIDGE_IPC="/tmp/openpilot_ros2_bridge_$(id -u)_$(printf %s "$NS" | sha1sum | cut -c1-12)" && ',
+    ]
+
+
 def _script_command(script_name, ros_arguments):
-    share_dir = get_package_share_directory('openpilot_ros2_bridge')
-    script_path = f'{share_dir}/scripts/{script_name}'
     return [
         'bash',
         '-lc',
         [
-            'source /opt/ros/',
-            LaunchConfiguration('ros_distro'),
-            '/setup.bash && ',
-            'OPENPILOT_ROOT="',
-            LaunchConfiguration('openpilot_root'),
-            '" && ',
-            'export PYTHONPATH="',
-            LaunchConfiguration('bridge_venv'),
-            '/lib/python3.12/site-packages:',
-            LaunchConfiguration('openpilot_root'),
-            ':',
-            LaunchConfiguration('openpilot_root'),
-            '/openpilot:',
-            LaunchConfiguration('openpilot_root'),
-            '/opendbc_repo:',
-            LaunchConfiguration('openpilot_root'),
-            '/msgq_repo:${PYTHONPATH:-}" && ',
+            *_environment(),
             # exec, so launch's SIGINT/SIGTERM reach the node instead of orphaning it under bash
             'exec python3 "',
-            script_path,
+            _script_path(script_name),
             '" --ros-args -r __ns:=/',
             LaunchConfiguration('namespace'),
             ' ',
@@ -78,17 +88,17 @@ def generate_launch_description():
         LaunchConfiguration('start_radar'), "'.lower() in ('true', '1') else '')",
     ])
 
+    # The PC side of the bridge: receives bridge_topics from the Comma and offers them to the nodes on this machine
     local_bridge = ExecuteProcess(
         condition=IfCondition(LaunchConfiguration('start_bridge')),
         cmd=[
             'bash',
             '-lc',
             [
-                'OPENPILOT_ROOT="',
-                LaunchConfiguration('openpilot_root'),
-                '" && ',
-                'if [ -d "$OPENPILOT_ROOT/cereal/messaging" ]; then OPENPILOT_CEREAL_DIR="$OPENPILOT_ROOT/cereal/messaging"; elif [ -d "$OPENPILOT_ROOT/openpilot/cereal/messaging" ]; then OPENPILOT_CEREAL_DIR="$OPENPILOT_ROOT/openpilot/cereal/messaging"; else echo "Could not find openpilot cereal/messaging under $OPENPILOT_ROOT" >&2; exit 1; fi && ',
-                'cd "$OPENPILOT_CEREAL_DIR" && exec ./bridge "',
+                *_environment(),
+                'exec python3 "',
+                _script_path('openpilot_bridge_receiver.py'),
+                '" "',
                 LaunchConfiguration('comma_ip'),
                 '" "',
                 bridge_topics,
@@ -98,19 +108,21 @@ def generate_launch_description():
         output='screen',
     )
 
+    # The Comma side over SSH: scripts/comma_bridge.py, or openpilot's own cereal bridge (comma_bridge). The Docker launch
+    # starts it from the host instead.
     remote_bridge = ExecuteProcess(
         condition=IfCondition(LaunchConfiguration('start_remote_bridge')),
         cmd=[
             'bash',
-            '-lc',
-            [
-                'ssh ',
-                LaunchConfiguration('remote_bridge_target'),
-                ' \'',
-                LaunchConfiguration('remote_bridge_command'),
-                '\'',
-            ],
+            _script_path('start_comma_bridge.sh'),
+            LaunchConfiguration('remote_bridge_target'),
+            LaunchConfiguration('comma_openpilot_dir'),
+            LaunchConfiguration('comma_bridge'),
+            LaunchConfiguration('remote_bridge_command'),
         ],
+        # ssh ends after about 15 s without the Comma (ServerAliveInterval); connect again once it's back
+        respawn=True,
+        respawn_delay=5.0,
         output='screen',
     )
 
@@ -249,7 +261,7 @@ def generate_launch_description():
         condition=_both('start_control', 'start_remote_bridge'),
         cmd=[
             'bash',
-            f"{get_package_share_directory('openpilot_ros2_bridge')}/scripts/start_comma_joystick_relay.sh",
+            _script_path('start_comma_joystick_relay.sh'),
             LaunchConfiguration('remote_bridge_target'),
             LaunchConfiguration('comma_openpilot_dir'),
             LaunchConfiguration('control_host_ip'),
@@ -288,10 +300,11 @@ def generate_launch_description():
         DeclareLaunchArgument('base_frame_height', default_value='0.0'),
         DeclareLaunchArgument('start_remote_bridge', default_value='false'),
         DeclareLaunchArgument('remote_bridge_target', default_value='comma@127.0.0.1'),
-        DeclareLaunchArgument(
-            'remote_bridge_command',
-            default_value='cd /data/openpilot/openpilot/cereal/messaging 2>/dev/null || cd /data/openpilot/cereal/messaging && exec ./bridge',
-        ),
+        # The Comma's side: python runs scripts/comma_bridge.py (any openpilot version); cereal runs openpilot's own cereal
+        # bridge (openpilot 0.11.2 and older), auto that one where the Comma's openpilot has it
+        DeclareLaunchArgument('comma_bridge', default_value='python'),
+        # Runs this on the Comma instead, when set
+        DeclareLaunchArgument('remote_bridge_command', default_value=''),
         DeclareLaunchArgument('comma_openpilot_dir', default_value='/data/openpilot'),
         DeclareLaunchArgument('start_control', default_value='false'),
         DeclareLaunchArgument('control_timeout', default_value='0.25'),

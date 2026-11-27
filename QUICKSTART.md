@@ -5,6 +5,8 @@ The driver runs in a ROS 2 Jazzy container. Topics appear under `/openpilot/...`
 
 The examples use the Comma at `192.168.10.26`. Change it if your Comma has a different address.
 
+It works with openpilot 0.10 and newer, including 0.11.3 and current master, which no longer have openpilot's cereal bridge; see [Supported openpilot versions](README.md#supported-openpilot-versions).
+
 ## 1. SSH access to the Comma (one-time)
 
 The Comma only accepts SSH keys that it downloads from a GitHub account.
@@ -60,12 +62,12 @@ sudo apt install ros-humble-can-msgs ros-humble-ros2-socketcan-msgs
 
 The launch file does the following, and does each step only when it's needed:
 
-1. **Comma side:** starts `cereal/messaging/bridge` on the Comma over SSH, unless it's already running there. It stops again when you stop the launch.
-2. **Image:** pulls `ghcr.io/jkk-research/openpilot_ros2_bridge:latest`, which already includes CycloneDDS and the build tools. Nothing is built. When the PC is offline, it uses the image it pulled last time.
+1. **Comma side:** copies [scripts/comma_bridge.py](scripts/comma_bridge.py) to the Comma and starts it over SSH with openpilot's own Python; it works with every openpilot version from 0.10 on. If another PC's launch already runs it there, or openpilot's own cereal bridge is running, it uses that one. It stops again when you stop the launch, and starts again after the Comma was out of reach.
+2. **Image:** pulls `ghcr.io/jkk-research/openpilot_ros2_bridge:latest`, which already includes CycloneDDS. Nothing is built. When the PC is offline, it uses the image it pulled last time.
 3. **openpilot checkout** (`prepare_openpilot:=true`): reads the Comma's openpilot repository and commit over SSH.
    - If `host_openpilot_root` is missing, it creates a checkout there.
    - If the checkout is on a different commit and has no local changes, it switches to the Comma's commit.
-   - It builds only msgq and `cereal/messaging/bridge`, inside the published image, and only when the commit changed since the last build.
+   - Nothing in it is built: the bridge reads its message definitions, service list and opendbc.
    - If SSH fails, it uses the checkout as it is.
 4. **Driver:** starts the container. It runs on your `RMW_IMPLEMENTATION`, `ROS_DOMAIN_ID` and `CYCLONEDDS_URI`; the CycloneDDS profile is mounted automatically.
 
@@ -84,6 +86,7 @@ Other useful arguments:
 |---|---|
 | `namespace:=openpilot` | Topic namespace. |
 | `comma_openpilot_dir:=/data/openpilot` | Where openpilot lives on the Comma. |
+| `comma_bridge:=cereal` | Runs openpilot's own cereal bridge on the Comma instead of `comma_bridge.py`, on openpilot 0.11.2 and older (`auto` picks it where it exists). |
 | `remote_bridge_target:=comma@<ip>` | SSH user and host. Defaults to `comma@<comma_ip>`. |
 | `cyclonedds_uri:=file:///path.xml` | Overrides `CYCLONEDDS_URI`. |
 | `start_tf:=false` | Turns off the TF frames. |

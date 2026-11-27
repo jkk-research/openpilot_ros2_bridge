@@ -4,7 +4,7 @@ import math
 import threading
 
 import rclpy
-import cereal.messaging as messaging
+import bridge_messaging as messaging
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from geometry_msgs.msg import TransformStamped

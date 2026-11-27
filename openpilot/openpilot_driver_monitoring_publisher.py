@@ -4,7 +4,7 @@ import sys
 import rclpy
 import numpy as np
 import threading
-import cereal.messaging as messaging
+import bridge_messaging as messaging
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from std_msgs.msg import MultiArrayDimension

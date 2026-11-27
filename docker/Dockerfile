@@ -26,16 +26,14 @@ RUN apt-get update && apt-get install -y \
     && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# CycloneDDS for hosts whose ROS 2 stack uses it, the standard CAN message types of the raw CAN frame topics,
-# plus what scripts/build_openpilot_minimal.sh needs to build msgq and the cereal bridge (libzmq is also the
-# bridge's runtime dependency)
+# CycloneDDS for hosts whose ROS 2 stack uses it, and the standard CAN message types of the raw CAN frame topics.
+# libzmq3-dev (and Cython below) only serve checkouts of this repository from before November 2026: the Docker launch
+# always pulls the newest image, and their prepare_openpilot still builds openpilot's msgq and cereal bridge in it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-jazzy-rmw-cyclonedds-cpp \
     ros-jazzy-can-msgs \
     ros-jazzy-ros2-socketcan-msgs \
     libzmq3-dev \
-    python3-dev \
-    g++ \
     && rm -rf /var/lib/apt/lists/*
 
 RUN git config --system http.sslCAInfo /etc/ssl/certs/ca-certificates.crt

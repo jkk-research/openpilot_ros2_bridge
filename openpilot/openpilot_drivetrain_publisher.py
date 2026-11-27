@@ -7,7 +7,7 @@ import time
 
 import rclpy
 import numpy as np
-import cereal.messaging as messaging
+import bridge_messaging as messaging
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rcl_interfaces.msg import ParameterDescriptor

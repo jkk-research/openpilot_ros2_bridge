@@ -22,10 +22,4 @@ source "${ROS2_WS}/install/setup.bash"
 set -u
 export PYTHONPATH="${OPENPILOT_ROOT}/openpilot:${PYTHONPATH:-}"
 
-# /dev/shm is shared with the host, so keep the bridge's msgq queues apart from any openpilot running
-# natively there: msgq wakes readers by signalling thread ids, which don't match across PID namespaces.
-# Older msgq versions keep prefixed queues in /dev/shm/<prefix>, newer ones in /dev/shm/msgq_<prefix>.
-export OPENPILOT_PREFIX="${OPENPILOT_PREFIX:-ros2_bridge_$(id -u)}"
-mkdir -p "/dev/shm/${OPENPILOT_PREFIX}" "/dev/shm/msgq_${OPENPILOT_PREFIX}"
-
 exec ros2 launch openpilot_ros2_bridge openpilot_bridge.launch.py "$@"

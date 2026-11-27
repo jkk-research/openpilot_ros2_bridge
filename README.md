@@ -18,14 +18,14 @@ ros2 launch /path/to/openpilot_ros2_bridge/launch/openpilot_bridge_docker.launch
   comma_ip:=<comma_device_ip>
 ```
 
-- If the openpilot checkout isn't built, add `prepare_openpilot:=true`. The launch then checks it out at the Comma's commit and builds the two parts the bridge uses, msgq and the cereal bridge, inside the container. This needs SSH access to the Comma; see [QUICKSTART.md](QUICKSTART.md).
+- Add `prepare_openpilot:=true` to have the launch check out the Comma's openpilot commit there, creating the checkout if needed. Nothing in it is built: the bridge only reads its message definitions, service list and opendbc. This needs SSH access to the Comma; see [QUICKSTART.md](QUICKSTART.md).
 - If the image can't be pulled, for example offline in the car, the launch uses the copy pulled last time.
 - To use an image built from your local source instead, add `image_name:=openpilot_ros2_bridge:local image_source:=build`.
 - To use the typed messages in your own nodes on the host, build this package in your workspace for its message types; see [Typed messages](#typed-messages).
 
 ### Option B: Local install
 
-Build openpilot natively ([instructions](https://github.com/commaai/openpilot/tree/master/tools#native-setup-on-ubuntu-2404-and-macos)), install the standard CAN message types (`sudo apt install ros-jazzy-can-msgs ros-jazzy-ros2-socketcan-msgs`) and create the bridge venv once with `./scripts/setup_bridge_venv.sh`. Then build this package in a ROS 2 Jazzy workspace and launch it:
+Clone openpilot at the Comma's version with its opendbc submodule (`git submodule update --init opendbc_repo`; nothing in it has to be built), install the standard CAN message types (`sudo apt install ros-jazzy-can-msgs ros-jazzy-ros2-socketcan-msgs`) and create the bridge venv once with `./scripts/setup_bridge_venv.sh`. Then build this package in a ROS 2 Jazzy workspace and launch it:
 
 ```bash
 cd /path/to/ros2_ws
@@ -38,7 +38,7 @@ ros2 launch openpilot_ros2_bridge openpilot_bridge.launch.py \
   comma_ip:=<comma_device_ip>
 ```
 
-In both cases, the Comma device must also run its side of the bridge (`cd openpilot/cereal/messaging && ./bridge`). Alternatively, add `start_remote_bridge:=true remote_bridge_target:=comma@<comma_device_ip>` to start it over SSH. The sections below cover the details.
+In both cases, the Comma device must also run its side of the bridge, [scripts/comma_bridge.py](scripts/comma_bridge.py). Add `start_remote_bridge:=true remote_bridge_target:=comma@<comma_device_ip>` to have the launch copy it to the Comma and start it over SSH, or start it by hand (see [Launching the bridge](#launching-the-bridge)). It works with every openpilot version from 0.10 on; see [Supported openpilot versions](#supported-openpilot-versions). The sections below cover the details.
 
 Everything is published as typed ROS 2 messages that mirror openpilot's own (see [Typed messages](#typed-messages)); add `publish_arrays:=true` to also get the older `Float32MultiArray` topics. To also stream the cameras, add `start_camera:=true cameras:=road,wide_road,driver` (see [Cameras](#cameras)).
 
@@ -56,6 +56,31 @@ Everything is published as typed ROS 2 messages that mirror openpilot's own (see
 All topics are published under the `openpilot` namespace (for example `/openpilot/carState`). Change it with `namespace:=<name>`.
 
 With `start_control:=true`, the bridge also takes acceleration and steering commands from ROS 2 and passes them to openpilot's joystick mode (see [Controlling the car](#controlling-the-car)).
+
+## Supported openpilot versions
+
+The bridge works with openpilot 0.10 and newer, including current master. openpilot removed its cereal bridge (`cereal/messaging/bridge`, which carried openpilot's messages over the network) from master on 2026-10-24 (commit `f2f9d5d`, "replace bridge with webrtc"), and openpilot 0.11.3, released on 2026-11-20, is the first release without it. The bridge doesn't need it on any version.
+
+| openpilot on the Comma (branches as of November 2026) | Has openpilot's cereal bridge |
+| --- | --- |
+| 0.11.3 and newer: `release-tizi` (comma 3X) since 2026-11-20, `release-tizi-staging`, `release-mici-staging`, `nightly`, and master since 2026-10-24 | no |
+| 0.11.2 and older: `release-mici` (comma four, 0.11.2), `release3` and `release-tici` (comma three, 0.10.0) | yes |
+
+With `start_remote_bridge:=true`, the launch copies [scripts/comma_bridge.py](scripts/comma_bridge.py) to the Comma and runs it with openpilot's own Python. It sends openpilot's messages the same way the cereal bridge did, so everything on the PC is the same for every version.
+
+- It reads the messages with the Comma's own openpilot libraries, so it always matches the Comma's version. Nothing has to be built or installed on the Comma.
+- It only reads a service while a PC is connected to it. If a second PC launches the bridge for the same Comma, it shares the running one. If openpilot's own cereal bridge already runs on the Comma, the launch uses that instead, whatever `comma_bridge` says.
+- It passes each message on as soon as openpilot publishes it: about 0.3 ms later on our test machine, where openpilot's cereal bridge took 50 ms on average and up to 100 ms. The cereal bridge waits for messages in another thread than the one openpilot's messaging wakes, so it only notices them every 100 ms. In exchange, `comma_bridge.py` uses about twice the CPU: 1.7% of one core against 0.75% on the test machine, for the default topics.
+- It subscribes to each service once. openpilot's cereal bridge subscribed again on every PC connection, and openpilot's messaging never gives a subscription back: once a service runs out, it resets all readers of that service, openpilot's own included. `comma_bridge.py` also checks that one more reader won't keep evicting openpilot's own, and waits otherwise; if the readers of a service start evicting each other while it reads, it stops reading that service within about a second and tries again every 10 s.
+- openpilot dropped pyzmq, the Python library for ZeroMQ, which carries the messages, from its dependencies in October 2026. AGNOS 20.6 still has it, later versions may not. So `comma_bridge.py` brings its own ZeroMQ, [scripts/comma_zmtp.py](scripts/comma_zmtp.py), which the launch copies along, and the joystick relay uses it where pyzmq is missing (see [Controlling the car](#controlling-the-car)).
+
+On versions that still have it, `comma_bridge:=cereal` runs openpilot's cereal bridge instead, and `comma_bridge:=auto` picks it where it exists. Both only use it when its source is there too, so an old binary that a git update left behind, built for another version of openpilot's messaging, never runs.
+
+The PC side receives the messages with `openpilot_bridge_receiver`, which is part of this package, for every openpilot version. It needs an openpilot checkout of the Comma's version for the message definitions, the list of services and opendbc, but nothing in it has to be built (`prepare_openpilot:=true` takes care of the checkout). The one exception is CAN decoding from a source checkout of openpilot 0.11.0 or older, rather than a release branch (see [Drivetrain](#drivetrain)).
+
+Tested on stand-ins for the Comma (containers with openpilot's own code, built the way the device has it) with openpilot 0.10.0, 0.11.2, 0.11.3 (`release-tizi`) and master at `40aa558` (2026-11-26).
+
+openpilot's replacement for the cereal bridge, WebRTC through its `webrtcd`, isn't used: its raw mode, which passes messages unchanged, exists only since that same change, so it can't serve older versions, and the older JSON mode loses messages. It also needs WebRTC libraries on the PC, allows one session at a time and doesn't run while the car is on.
 
 ## Typed messages
 
@@ -109,22 +134,28 @@ The Docker version then needs an image built from your checkout as well (`image_
 ## Prerequisites
 
 1. Install ROS 2 Jazzy.
-2. Have an openpilot checkout available locally.
-3. Build the openpilot messaging bridge in that checkout by following the official openpilot setup instructions: https://github.com/commaai/openpilot/tree/master/tools#native-setup-on-ubuntu-2404-and-macos
-4. Install the standard CAN message types that the raw CAN frames use:
+2. Have an openpilot checkout of the version the Comma runs, with the opendbc submodule. Nothing in it has to be built:
+
+   ```bash
+   git clone https://github.com/commaai/openpilot.git && cd openpilot
+   git checkout <the Comma's commit>
+   git submodule update --init --depth 1 opendbc_repo
+   ```
+
+3. Install the standard CAN message types that the raw CAN frames use:
 
    ```bash
    sudo apt install ros-jazzy-can-msgs ros-jazzy-ros2-socketcan-msgs
    ```
 
-5. Create the bridge virtual environment:
+4. Create the bridge virtual environment:
 
    ```bash
    cd /path/to/openpilot_ros2_bridge
    ./scripts/setup_bridge_venv.sh
    ```
 
-6. Build this repository in a ROS 2 workspace:
+5. Build this repository in a ROS 2 workspace:
 
    ```bash
    cd /path/to/ros2_ws
@@ -134,11 +165,19 @@ The Docker version then needs an image built from your checkout as well (`image_
 
 ## Launching the bridge
 
-If you want the Comma device to start its side of the cereal bridge through SSH, enable `start_remote_bridge`.
-Otherwise start it manually on the device:
+With `start_remote_bridge:=true`, the launch starts the Comma's side of the bridge over SSH (see [Supported openpilot versions](#supported-openpilot-versions)), stops it again when the launch stops, and starts it again after the Comma was out of reach.
+To start it by hand instead, copy `comma_bridge.py` and `comma_zmtp.py` from this repository's `scripts/` to the Comma, where the launch puts them, and run them with openpilot's Python. With `-t`, Ctrl+C or closing the terminal stops it:
 
 ```bash
-cd openpilot/cereal/messaging
+ssh comma@<comma_device_ip> mkdir -p /tmp/openpilot_ros2_bridge
+scp scripts/comma_bridge.py scripts/comma_zmtp.py comma@<comma_device_ip>:/tmp/openpilot_ros2_bridge/
+ssh -t comma@<comma_device_ip> /usr/local/venv/bin/python3 /tmp/openpilot_ros2_bridge/comma_bridge.py
+```
+
+On openpilot 0.11.2 and older, openpilot's own cereal bridge works too:
+
+```bash
+cd /data/openpilot/openpilot/cereal/messaging   # /data/openpilot/cereal/messaging on older versions
 ./bridge
 ```
 
@@ -161,6 +200,8 @@ Useful optional arguments:
 
 - `start_remote_bridge:=true`
 - `remote_bridge_target:=comma@<comma_device_ip>`
+- `comma_bridge:=cereal` (runs openpilot's own cereal bridge on the Comma instead of `comma_bridge.py`, on openpilot 0.11.2 and older; `auto` picks it where it exists; see [Supported openpilot versions](#supported-openpilot-versions))
+- `remote_bridge_command:='<command>'` (runs this on the Comma instead)
 - `bridge_topics:=modelV2,carControl,carState,longitudinalPlan,lateralPlan,liveCalibration,extrinsicsCalibration,driverStateV2,driverMonitoringState,carOutput,carParams,can`
 - `namespace:=openpilot`
 - `publish_arrays:=true`
@@ -216,7 +257,7 @@ ros2 topic echo /openpilot/lanes_markers
 ## Cameras
 
 With `start_camera:=true`, the launch file starts one camera node per entry in `cameras`.
-Each node connects directly to the cereal bridge on the device (`camera_ip`, which defaults to `comma_ip`), so the camera streams do not need to be in `bridge_topics`.
+Each node connects directly to the Comma's side of the bridge (`camera_ip`, which defaults to `comma_ip`), so the camera streams do not need to be in `bridge_topics`.
 It decodes the video with PyAV and publishes:
 
 - `/openpilot/<camera>_camera/image_raw` (`sensor_msgs/Image`, `bgr8`)
@@ -304,7 +345,7 @@ Frames with a bad checksum are dropped where opendbc checks the brand's checksum
 GM, Hyundai/Kia CAN, Mazda, Nissan and Subaru pre-global frames are not checked, and their checksum and counter signals are published as data.
 If the Comma reports a different car, the node switches to that car's DBC.
 This needs openpilot 0.10.0 or newer, whose opendbc has the pure-Python CAN parser; with older versions the node logs a warning and decodes nothing.
-On openpilot 0.11.0 and older, opendbc's `*_generated` DBC files only exist after a full openpilot build.
+On openpilot 0.11.0 and older, some cars' DBC files are opendbc's `*_generated` ones. Release branches (`release3`, `release-tici`) include them, so the checkout of the Comma's commit has them; a source checkout of those versions only gets them from a full openpilot build.
 
 Default messages per opendbc brand. A brand's list covers all its DBC variants, and the node keeps the ones the car's DBC defines:
 
@@ -495,7 +536,7 @@ So when commands stop, the car holds its speed and, depending on the car, stops 
 How it works:
 
 - `openpilot_joystick_sender` subscribes to `joystick_command` and sends openpilot's `testJoystick` message to the Comma at 100 Hz, also when there's no command, over ZMQ on TCP port 57078 of this PC. That is the port openpilot's cereal bridge uses for this message.
-- On the Comma, a small relay, [scripts/comma_joystick_relay.py](scripts/comma_joystick_relay.py), runs with openpilot's own Python. The launch copies it to the Comma and starts it over SSH, like the remote bridge, and starts it again when the connection drops. Nothing has to be installed on the Comma.
+- On the Comma, a small relay, [scripts/comma_joystick_relay.py](scripts/comma_joystick_relay.py), runs with openpilot's own Python. The launch copies it to the Comma and starts it over SSH, like the remote bridge, and starts it again when the connection drops. Nothing has to be installed on the Comma: the relay uses openpilot's pyzmq where the Comma has it, and otherwise [scripts/comma_zmtp.py](scripts/comma_zmtp.py), which the launch copies along.
 - The relay checks each message and passes it to openpilot's `joystickd`, which runs instead of `controlsd` in joystick mode and turns it into `carControl`. Messages that arrive more than 0.1 s late, such as a backlog after a Wi-Fi stall, are dropped.
 - In joystick mode, openpilot also starts its own `joystick_control`, for a gamepad plugged into the Comma. Without a gamepad, it sends zeros that would replace the PC's commands, so the relay takes the message back from it.
 - The PC side runs in the bridge's own image, so there is no separate image for it.
@@ -535,11 +576,9 @@ docker run --rm --network host --ipc host --user "$(id -u):$(id -g)" -e HOME=/tm
   bash -lc 'source /opt/ros/jazzy/setup.bash && \
             source /workspace/ros2_ws/src/openpilot_ros2_bridge/.venv/bin/activate && \
             source /workspace/ros2_ws/install/setup.bash && \
-            export PYTHONPATH=/workspace/openpilot:/workspace/openpilot/openpilot:/workspace/openpilot/opendbc_repo:/workspace/openpilot/msgq_repo:${PYTHONPATH} && \
-            python3 -c "import rclpy, av, cereal.messaging; print(\"ROS 2 and openpilot imports OK\")" && \
-            ros2 pkg prefix openpilot_ros2_bridge && \
-            { test -x /workspace/openpilot/openpilot/cereal/messaging/bridge || test -x /workspace/openpilot/cereal/messaging/bridge; } && \
-            echo "cereal bridge found"'
+            export PYTHONPATH=/workspace/openpilot:/workspace/openpilot/openpilot:/workspace/openpilot/opendbc_repo:${PYTHONPATH} && \
+            python3 -c "import rclpy, av, zmq; from cereal import log; from cereal.services import SERVICE_LIST; print(\"ROS 2 and openpilot imports OK\")" && \
+            ros2 pkg prefix openpilot_ros2_bridge'
 ```
 
 Launch the containerized bridge from the host. No colcon build is needed when you run the launch file by path:
@@ -564,7 +603,9 @@ ros2 launch /path/to/openpilot_ros2_bridge/launch/openpilot_bridge_docker.launch
 
 The Docker launch file pulls (or builds) the image, starts the container with `--network host` and `--ipc host`, forwards `ROS_DOMAIN_ID`, `RMW_IMPLEMENTATION` and `CYCLONEDDS_URI`, and then runs the in-container `openpilot_bridge.launch.py`.
 The container runs as your user. A root container can't share Fast DDS shared memory with your host nodes, so they would see topics but receive no data.
-Inside the container, msgq uses its own `OPENPILOT_PREFIX`, so it never touches the queues of an openpilot running natively on the host.
+Inside the container, `openpilot_bridge_receiver` passes the Comma's messages to the nodes over local ZeroMQ sockets in the container's `/tmp`, so the bridge never touches an openpilot running natively on the host.
+
+`test/test_comma_zmtp.py` checks `scripts/comma_zmtp.py`, the ZeroMQ implementation that runs on the Comma, against libzmq. It needs only pyzmq, so the bridge venv runs it: `.venv/bin/python3 test/test_comma_zmtp.py`. `test/test_comma_bridge.py` checks how `scripts/comma_bridge.py` reads openpilot's msgq queues before it subscribes, on queue files it writes itself; it needs only Python: `python3 test/test_comma_bridge.py`.
 
 For a quick runtime smoke test without a Comma device connection:
 
@@ -579,7 +620,7 @@ docker run --rm --network host --ipc host --user "$(id -u):$(id -g)" -e HOME=/tm
 ## Published container image
 
 `.github/workflows/publish-docker.yml` publishes the Docker image to GHCR on pushes to `main`, version tags, and manual runs.
-The image includes CycloneDDS, the standard CAN message types and the tools `prepare_openpilot` needs, so no local image build is required.
+The image includes CycloneDDS and the standard CAN message types, so no local image build is required.
 
 To pull it by hand:
 
